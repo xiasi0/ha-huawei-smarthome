@@ -113,6 +113,7 @@ class MqttConnectionSettings:
     subscription_qos: int = 2  # Official command-channel SUBSCRIBE QoS.
     username: str | None = field(default=None, repr=False)
     password: str | None = field(default=None, repr=False)
+    control_source: str = "huawei-smarthome"
     use_tls: bool = True
     keepalive: int = 60
     clean_session: bool | None = None

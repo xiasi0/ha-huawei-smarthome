@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import datetime, timezone
+import json
 import logging
 from typing import Any, Protocol
 
@@ -28,6 +30,7 @@ class MqttProtocolError(HuaweiSmartHomeError):
 
 MqttStateListener = Callable[[ConnectionState], Awaitable[None] | None]
 MqttConnectionLostHandler = Callable[[], None]
+MqttMessageHandler = Callable[[str, bytes], None]
 
 
 class AsyncMqttTransport(Protocol):
@@ -46,11 +49,17 @@ class AsyncMqttTransport(Protocol):
     async def disconnect(self) -> None:
         """Disconnect from the broker."""
 
+    async def publish(self, topic: str, payload: bytes, qos: int) -> None:
+        """Publish one MQTT message."""
+
     def set_connection_lost_handler(
         self,
         handler: MqttConnectionLostHandler | None,
     ) -> None:
         """Set the unexpected-disconnect callback."""
+
+    def set_message_handler(self, handler: MqttMessageHandler | None) -> None:
+        """Set the application message callback."""
 
 
 class HuaweiMqttClient:
@@ -61,6 +70,7 @@ class HuaweiMqttClient:
         *,
         transport: AsyncMqttTransport | None = None,
         on_state_changed: MqttStateListener | None = None,
+        on_message: MqttMessageHandler | None = None,
         connect_timeout: float = 20.0,
     ) -> None:
         if connect_timeout <= 0:
@@ -69,6 +79,7 @@ class HuaweiMqttClient:
             connect_timeout=connect_timeout,
         )
         self._on_state_changed = on_state_changed
+        self._on_message = on_message
         self._state = ConnectionState.STOPPED
         self._generation = 0
         self._settings: MqttConnectionSettings | None = None
@@ -95,6 +106,76 @@ class HuaweiMqttClient:
 
         return self._settings
 
+    def set_message_handler(self, handler: MqttMessageHandler | None) -> None:
+        """Set the application message callback."""
+
+        self._on_message = handler
+        set_handler = getattr(self._transport, "set_message_handler", None)
+        if callable(set_handler):
+            set_handler(handler)
+
+    async def async_publish(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        qos: int = 1,
+    ) -> None:
+        """Publish a raw MQTT payload on the active connection."""
+
+        if self._state is not ConnectionState.RUNNING:
+            raise MqttConnectionError("MQTT client is not running")
+        if not topic:
+            raise MqttConfigurationError("MQTT publish topic is empty")
+        if qos not in {0, 1, 2}:
+            raise MqttConfigurationError("MQTT publish QoS is invalid")
+        try:
+            await self._transport.publish(topic, payload, qos)
+        except HuaweiSmartHomeError:
+            raise
+        except Exception as error:
+            raise MqttConnectionError("MQTT publish failed") from error
+
+    async def async_publish_command(
+        self,
+        *,
+        topic: str,
+        target: str,
+        body: dict[str, Any],
+        request_id: str,
+    ) -> None:
+        """Publish one SmartHome command envelope."""
+
+        settings = self._settings
+        if settings is None or not settings.username or not settings.password:
+            raise MqttConnectionError("MQTT command credentials are unavailable")
+        if not target or not request_id:
+            raise MqttConfigurationError("MQTT command route is incomplete")
+        payload = json.dumps(
+            {
+                "body": body,
+                "header": {
+                    "accessToken": settings.password,
+                    "ctrlSrc": settings.control_source,
+                    "ctrlSrcType": 2,
+                    "ctrlType": 1,
+                    "from": f"/users/{settings.username}",
+                    "method": "POST",
+                    "mode": "ACK",
+                    "requestId": request_id,
+                    "seq": -1,
+                    "timestamp": datetime.now(timezone.utc).strftime(
+                        "%Y%m%dT%H%M%SZ"
+                    ),
+                    "to": target,
+                },
+                "seq": -1,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        await self.async_publish(topic, payload, qos=1)
+
     async def async_start(self, settings: MqttConnectionSettings) -> None:
         """Connect and subscribe before exposing the client as running."""
 
@@ -112,7 +193,6 @@ class HuaweiMqttClient:
         async with self._operation_lock:
             await self._stop_unlocked()
             self._generation += 1
-            generation = self._generation
             self._settings = settings
             self._loop = asyncio.get_running_loop()
             self._stopping = False
@@ -120,15 +200,23 @@ class HuaweiMqttClient:
             self._transport.set_connection_lost_handler(
                 self._mark_connection_lost
             )
+            self.set_message_handler(self._on_message)
             await self._set_state(ConnectionState.MQTT_CONNECTING)
+            stage = "transport.connect"
             try:
                 await self._transport.connect(settings)
                 await self._set_state(ConnectionState.MQTT_SUBSCRIBING)
+                stage = "transport.subscribe"
                 await self._transport.subscribe(
                     settings.subscription_filters,
                     settings.subscription_qos,
                 )
             except Exception as error:
+                _LOGGER.error(
+                    "Huawei SmartHome MQTT startup failed: stage=%s error=%s",
+                    stage,
+                    _exception_summary(error),
+                )
                 try:
                     await self._transport.disconnect()
                 finally:
@@ -139,11 +227,6 @@ class HuaweiMqttClient:
                 ) from error
 
             await self._set_state(ConnectionState.RUNNING)
-            _LOGGER.debug(
-                "Huawei SmartHome MQTT ready: generation=%s filters=%s",
-                generation,
-                settings.subscription_filters,
-            )
 
     async def async_wait_connection_lost(self) -> None:
         """Wait for an unexpected connection loss."""
@@ -194,7 +277,7 @@ class HuaweiMqttClient:
 
 
 class PahoMqttTransport:
-    """Paho MQTT 3.1.1 transport with no application message handler."""
+    """Paho MQTT 3.1.1 transport."""
 
     def __init__(self, *, connect_timeout: float = 20.0) -> None:
         self._connect_timeout = connect_timeout
@@ -203,6 +286,7 @@ class PahoMqttTransport:
         self._connected: asyncio.Event | None = None
         self._connect_error: BaseException | None = None
         self._connection_lost_handler: MqttConnectionLostHandler | None = None
+        self._message_handler: MqttMessageHandler | None = None
         self._pending_subscriptions: dict[int, asyncio.Future[None]] = {}
         self._subscription_results: dict[int, BaseException | None] = {}
 
@@ -227,17 +311,29 @@ class PahoMqttTransport:
         if settings.username is not None:
             client.username_pw_set(settings.username, settings.password)
         if settings.use_tls:
-            await asyncio.to_thread(client.tls_set)
+            try:
+                await asyncio.to_thread(client.tls_set)
+            except Exception as error:
+                _LOGGER.warning(
+                    "Huawei SmartHome MQTT TLS setup failed: error=%s",
+                    _exception_summary(error),
+                )
+                raise
         client.on_connect = self._on_connect
         client.on_connect_fail = self._on_connect_fail
         client.on_disconnect = self._on_disconnect
         client.on_subscribe = self._on_subscribe
+        client.on_message = self._on_message
         result = client.connect_async(
             settings.broker_host,
             settings.broker_port,
             settings.keepalive,
         )
-        if result != mqtt.MQTT_ERR_SUCCESS:
+        if result not in (None, mqtt.MQTT_ERR_SUCCESS):
+            _LOGGER.warning(
+                "Huawei SmartHome MQTT CONNECT submission rejected: result=%s",
+                result,
+            )
             raise MqttConnectionError(
                 f"MQTT connect_async returned {result}"
             )
@@ -248,10 +344,21 @@ class PahoMqttTransport:
                 timeout=self._connect_timeout,
             )
         except asyncio.TimeoutError as error:
+            _LOGGER.warning(
+                "Huawei SmartHome MQTT CONNACK timed out: broker=%s:%s "
+                "timeout=%ss",
+                settings.broker_host,
+                settings.broker_port,
+                self._connect_timeout,
+            )
             await self.disconnect()
             raise MqttConnectionError("MQTT connection timed out") from error
         if self._connect_error is not None:
             error = self._connect_error
+            _LOGGER.warning(
+                "Huawei SmartHome MQTT CONNACK rejected: reason=%s",
+                _exception_summary(error),
+            )
             await self.disconnect()
             raise MqttConnectionError("MQTT broker connection failed") from error
 
@@ -262,6 +369,33 @@ class PahoMqttTransport:
         """Set the unexpected-disconnect callback."""
 
         self._connection_lost_handler = handler
+
+    def set_message_handler(self, handler: MqttMessageHandler | None) -> None:
+        """Set the application message callback."""
+
+        self._message_handler = handler
+
+    async def publish(self, topic: str, payload: bytes, qos: int) -> None:
+        """Publish and wait for the MQTT transport acknowledgement."""
+
+        import paho.mqtt.client as mqtt
+
+        client = self._client
+        if client is None:
+            raise MqttConnectionError("MQTT client is not connected")
+        result = client.publish(topic, payload=payload, qos=qos)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise MqttProtocolError(f"MQTT publish returned {result.rc}")
+        if qos:
+            try:
+                await asyncio.to_thread(
+                    result.wait_for_publish,
+                    self._connect_timeout,
+                )
+            except TypeError:
+                await asyncio.to_thread(result.wait_for_publish)
+            if not result.is_published():
+                raise MqttConnectionError("MQTT publish timed out")
 
     async def subscribe(
         self,
@@ -279,6 +413,12 @@ class PahoMqttTransport:
                 raise MqttConfigurationError("MQTT subscription filter is empty")
             result, mid = self._client.subscribe(topic_filter, qos=qos)
             if result != 0:
+                _LOGGER.warning(
+                    "Huawei SmartHome MQTT SUBSCRIBE submission rejected: "
+                    "filter=%s result=%s",
+                    topic_filter,
+                    result,
+                )
                 raise MqttProtocolError(f"MQTT subscribe returned {result}")
             future = self._loop.create_future()
             self._pending_subscriptions[mid] = future
@@ -295,6 +435,13 @@ class PahoMqttTransport:
                 )
             except asyncio.TimeoutError as error:
                 self._pending_subscriptions.pop(mid, None)
+                _LOGGER.warning(
+                    "Huawei SmartHome MQTT SUBACK timed out: filter=%s mid=%s "
+                    "timeout=%ss",
+                    topic_filter,
+                    mid,
+                    self._connect_timeout,
+                )
                 raise MqttConnectionError("MQTT subscription timed out") from error
             finally:
                 self._pending_subscriptions.pop(mid, None)
@@ -331,6 +478,7 @@ class PahoMqttTransport:
 
     def _on_connect_fail(self, _client: Any, _userdata: Any) -> None:
         self._connect_error = RuntimeError("TCP connection failed")
+        _LOGGER.warning("Huawei SmartHome MQTT network connect failed")
         if self._loop is not None and self._connected is not None:
             self._loop.call_soon_threadsafe(self._connected.set)
 
@@ -348,6 +496,24 @@ class PahoMqttTransport:
         ):
             self._connection_lost_handler()
 
+    def _on_message(
+        self,
+        _client: Any,
+        _userdata: Any,
+        message: Any,
+    ) -> None:
+        if self._loop is None or self._message_handler is None:
+            return
+        topic = getattr(message, "topic", "")
+        payload = getattr(message, "payload", b"")
+        if not isinstance(topic, str) or not isinstance(payload, bytes):
+            return
+        self._loop.call_soon_threadsafe(
+            self._message_handler,
+            topic,
+            payload,
+        )
+
     def _on_subscribe(
         self,
         _client: Any,
@@ -358,9 +524,10 @@ class PahoMqttTransport:
     ) -> None:
         if self._loop is None:
             return
+        codes = _reason_codes(reason_codes)
         failed = any(
             not _subscription_reason_ok(code)
-            for code in _reason_codes(reason_codes)
+            for code in codes
         )
         future = self._pending_subscriptions.get(mid)
         error = (
@@ -368,6 +535,12 @@ class PahoMqttTransport:
             if failed
             else None
         )
+        if failed:
+            _LOGGER.warning(
+                "Huawei SmartHome MQTT SUBACK rejected: mid=%s reason_codes=%s",
+                mid,
+                tuple(_reason_code_text(code) for code in codes),
+            )
         if future is None:
             self._subscription_results[mid] = error
             return
@@ -386,6 +559,33 @@ def _reason_ok(value: Any) -> bool:
         return int(value) == 0
     except (TypeError, ValueError):
         return str(value).lower() == "success"
+
+
+def _reason_code_text(value: Any) -> str:
+    """Return a safe textual MQTT reason code."""
+
+    try:
+        return f"{value} (code={int(value)})"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _exception_summary(error: BaseException) -> str:
+    """Summarize a short exception chain without payload data."""
+
+    parts: list[str] = []
+    current: BaseException | None = error
+    for _ in range(3):
+        if current is None:
+            break
+        message = str(current).replace("\n", " ").strip()
+        parts.append(
+            f"{type(current).__name__}: {message[:200]}"
+            if message
+            else type(current).__name__
+        )
+        current = current.__cause__ or current.__context__
+    return " <- ".join(parts)
 
 
 def _subscription_reason_ok(value: Any) -> bool:

@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import datetime, timezone
 import logging
-from typing import Protocol
 import uuid
+from typing import Any, Protocol
 
 from .api.client import SmartHomeDiscoveryApi
 from .api.errors import AuthExpiredError
@@ -27,6 +28,7 @@ from .domain.models import (
     RemoteDiscoverySnapshot,
 )
 from .errors import ReauthenticationRequired
+from .hwiotdevices.registry import create_hwiot_device
 from .mqtt_client import HuaweiMqttClient
 from .storage.credentials import CredentialBindingError
 from .storage.profile_metadata import ProductMetadataStore
@@ -87,6 +89,7 @@ class HuaweiSmartHomeClient:
         self.mqtt = mqtt or HuaweiMqttClient(
             on_state_changed=self._mqtt_state_changed,
         )
+        self.mqtt.set_message_handler(self._mqtt_message_received)
         self.state = AccountState(
             selected_home_ids=selected_home_ids or frozenset(),
         )
@@ -96,6 +99,7 @@ class HuaweiSmartHomeClient:
         self._refresh_lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task[None] | None = None
         self._operation_lock = asyncio.Lock()
+        self._hwiot_devices: dict[tuple[str, str], Any] = {}
         self._reconnect_min = reconnect_min
         self._reconnect_max = reconnect_max
         self._started = False
@@ -117,6 +121,12 @@ class HuaweiSmartHomeClient:
         """Return devices excluded from the local HA projection."""
 
         return self._excluded_device_ids
+
+    @property
+    def hwiot_devices(self) -> Mapping[tuple[str, str], Any]:
+        """Return instantiated product devices."""
+
+        return self._hwiot_devices
 
     async def async_start(self) -> None:
         """Restore the account, discover devices and start MQTT."""
@@ -155,8 +165,9 @@ class HuaweiSmartHomeClient:
                     raise
                 except Exception as error:
                     _LOGGER.warning(
-                        "Huawei SmartHome MQTT startup failed: %s",
+                        "Huawei SmartHome MQTT startup failed: %s: %s",
                         type(error).__name__,
+                        str(error),
                     )
                     self.state.connection = ConnectionState.DEGRADED
                 self._reconnect_task = asyncio.create_task(
@@ -204,6 +215,9 @@ class HuaweiSmartHomeClient:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        for device in self._hwiot_devices.values():
+            device.close()
+        self._hwiot_devices.clear()
         await self.mqtt.async_stop()
         if self.session_manager is not None:
             await self.session_manager.async_stop()
@@ -224,6 +238,7 @@ class HuaweiSmartHomeClient:
             raise RuntimeError("Huawei SmartHome snapshot contains duplicate devices")
         self.state.homes = {home.home_id: home for home in snapshot.homes}
         self.state.devices = devices
+        self._sync_hwiot_devices()
         self.state.device_home_index = _device_home_index(snapshot)
         self.state.revision += 1
         self.state.last_snapshot_at = snapshot.received_at
@@ -394,8 +409,9 @@ class HuaweiSmartHomeClient:
                 raise
             except Exception as error:
                 _LOGGER.warning(
-                    "Huawei SmartHome MQTT token rotation failed: %s",
+                    "Huawei SmartHome MQTT token rotation failed: %s: %s",
                     type(error).__name__,
+                    str(error),
                 )
                 self.state.connection = ConnectionState.DEGRADED
 
@@ -417,6 +433,7 @@ class HuaweiSmartHomeClient:
                 subscription_qos=OBSERVED_MQTT_SUBSCRIPTION_QOS,
                 username=session.user_id,
                 password=session.oauth_access_token,
+                control_source=session.device_name,
                 use_tls=True,
                 keepalive=60,
                 clean_session=True,
@@ -451,8 +468,9 @@ class HuaweiSmartHomeClient:
                 raise
             except Exception as error:
                 _LOGGER.warning(
-                    "Huawei SmartHome MQTT reconnect failed: %s",
+                    "Huawei SmartHome MQTT reconnect failed: %s: %s",
                     type(error).__name__,
+                    str(error),
                 )
                 self.state.connection = ConnectionState.DEGRADED
                 delay = min(delay * 2, self._reconnect_max)
@@ -465,6 +483,39 @@ class HuaweiSmartHomeClient:
             self.state.last_error = None
         elif state is ConnectionState.DEGRADED:
             self.state.last_error = "Huawei SmartHome MQTT is unavailable"
+
+    def _mqtt_message_received(self, topic: str, payload: bytes) -> None:
+        """Route one MQTT payload to the matching product devices."""
+
+        self.state.last_event_at = datetime.now(timezone.utc)
+        for device in tuple(self._hwiot_devices.values()):
+            device.handle_mqtt_message(topic, payload)
+
+    def _sync_hwiot_devices(self) -> None:
+        """Keep product device objects aligned with the latest snapshot."""
+
+        current: dict[tuple[str, str], Any] = {}
+        for descriptor in self.state.devices.values():
+            if (descriptor.node_type or "").strip().upper() == "GROUP":
+                continue
+            existing = self._hwiot_devices.get(descriptor.key)
+            if (
+                existing is not None
+                and str(existing.prod_id).strip().lower()
+                == str(descriptor.prod_id or "").strip().lower()
+            ):
+                existing.update_descriptor(descriptor)
+                current[descriptor.key] = existing
+                continue
+            if existing is not None:
+                existing.close()
+            device = create_hwiot_device(descriptor, self.mqtt)
+            if device is not None:
+                current[descriptor.key] = device
+        for key, device in self._hwiot_devices.items():
+            if key not in current:
+                device.close()
+        self._hwiot_devices = current
 
 
 def _device_home_index(
