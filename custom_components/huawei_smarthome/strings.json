@@ -1,0 +1,40 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Huawei SmartHome",
+        "description": "Sign in with your Huawei account.",
+        "data": {
+          "account": "Huawei account",
+          "password": "Password"
+        }
+      },
+      "challenge": {
+        "title": "Device verification",
+        "description": "{prompt}.",
+        "data": {
+          "challenge_code": "Challenge code"
+        }
+      },
+      "home": {
+        "title": "Select homes",
+        "description": "Choose the Huawei homes to discover.",
+        "data": {
+          "selected_home_ids": "Homes"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "The Huawei account or verification code was rejected.",
+      "cannot_connect": "Unable to connect to Huawei SmartHome.",
+      "home_required": "Select at least one home.",
+      "reauth_failed": "The Huawei SmartHome entry could not be reauthenticated."
+    },
+    "abort": {
+      "already_configured": "This Huawei account is already configured.",
+      "cannot_connect": "Unable to connect to Huawei SmartHome.",
+      "reauth_failed": "Reauthentication failed.",
+      "unique_id_mismatch": "The authenticated Huawei account does not match this entry."
+    }
+  }
+}

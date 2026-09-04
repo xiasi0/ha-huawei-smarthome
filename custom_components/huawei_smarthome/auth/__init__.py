@@ -1,0 +1,1 @@
+"""Huawei SmartHome authentication boundaries."""

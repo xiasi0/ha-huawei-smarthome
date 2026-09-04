@@ -1,0 +1,40 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "华为智慧生活",
+        "description": "使用华为账号登录。",
+        "data": {
+          "account": "华为账号",
+          "password": "密码"
+        }
+      },
+      "challenge": {
+        "title": "设备验证",
+        "description": "{prompt}。",
+        "data": {
+          "challenge_code": "挑战码"
+        }
+      },
+      "home": {
+        "title": "选择家庭",
+        "description": "选择需要发现的华为家庭。",
+        "data": {
+          "selected_home_ids": "家庭"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "华为账号或挑战码被拒绝。",
+      "cannot_connect": "无法连接华为智慧生活。",
+      "home_required": "请至少选择一个家庭。",
+      "reauth_failed": "无法重新验证华为智慧生活配置。"
+    },
+    "abort": {
+      "already_configured": "此华为账号已经配置。",
+      "cannot_connect": "无法连接华为智慧生活。",
+      "reauth_failed": "重新验证失败。",
+      "unique_id_mismatch": "认证的华为账号与当前配置项不一致。"
+    }
+  }
+}
