@@ -4,17 +4,37 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .device_registry import device_identifier, profile_configuration_url
 
-_SENSOR_NAMES = {
-    "current": "Current",
-    "consumption": "Consumption",
+_SENSOR_METADATA = {
+    # The 124U H5 profile calls power/current "当前功率" and renders W.
+    "current": (
+        "Power",
+        SensorDeviceClass.POWER,
+        UnitOfPower.WATT,
+        SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
+    # H5 daily statistics are displayed in kWh and divide the raw Wh value
+    # by 1000 before rendering it.
+    "consumption": (
+        "Energy consumption",
+        SensorDeviceClass.ENERGY,
+        UnitOfEnergy.KILO_WATT_HOUR,
+        SensorStateClass.TOTAL_INCREASING,
+        0.001,
+    ),
 }
 
 
@@ -30,20 +50,24 @@ async def async_setup_entry(
     entities = []
     for device in client.hwiot_devices.values():
         for key in getattr(device, "energy_sensor_keys", ()):
-            name = _SENSOR_NAMES.get(key)
-            if name is not None:
-                entities.append(HuaweiSmartHomeSensor(device, key, name))
+            metadata = _SENSOR_METADATA.get(key)
+            if metadata is not None:
+                entities.append(HuaweiSmartHomeSensor(device, key, metadata))
     async_add_entities(entities)
 
 
 class HuaweiSmartHomeSensor(SensorEntity):
     """Project one raw product energy characteristic as a sensor."""
 
-    def __init__(self, device: Any, key: str, name: str) -> None:
+    def __init__(self, device: Any, key: str, metadata: tuple[Any, ...]) -> None:
         self._device = device
         self._key = key
+        name, device_class, unit, state_class, self._value_scale = metadata
         self._attr_unique_id = f"{device.home_id}_{device.dev_id}_{key}"
         self._attr_name = name
+        self._attr_device_class = device_class
+        self._attr_native_unit_of_measurement = unit
+        self._attr_state_class = state_class
         self._attr_has_entity_name = True
         self._attr_should_poll = False
 
@@ -65,8 +89,11 @@ class HuaweiSmartHomeSensor(SensorEntity):
         return self._device.available
 
     @property
-    def native_value(self) -> int | None:
-        return getattr(self._device, self._key)
+    def native_value(self) -> int | float | None:
+        value = getattr(self._device, self._key)
+        if value is None or self._value_scale == 1.0:
+            return value
+        return value * self._value_scale
 
     async def async_added_to_hass(self) -> None:
         self._device.add_state_listener(self._state_changed)
