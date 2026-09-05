@@ -10,7 +10,13 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
+from homeassistant.const import (
+    PERCENTAGE,
+    UnitOfElectricCurrent,
+    UnitOfElectricPotential,
+    UnitOfEnergy,
+    UnitOfPower,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -47,6 +53,34 @@ _SENSOR_METADATA = {
         None,
         PERCENTAGE,
         SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
+    "power": (
+        "Current power",
+        SensorDeviceClass.POWER,
+        UnitOfPower.WATT,
+        SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
+    "electric_current": (
+        "Current",
+        SensorDeviceClass.CURRENT,
+        UnitOfElectricCurrent.AMPERE,
+        SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
+    "voltage": (
+        "Voltage",
+        SensorDeviceClass.VOLTAGE,
+        UnitOfElectricPotential.VOLT,
+        SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
+    "total_electricity": (
+        "Total electricity",
+        SensorDeviceClass.ENERGY,
+        UnitOfEnergy.KILO_WATT_HOUR,
+        SensorStateClass.TOTAL_INCREASING,
         1.0,
     ),
 }
