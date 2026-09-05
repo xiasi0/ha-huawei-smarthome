@@ -15,6 +15,7 @@ from homeassistant.const import (
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
     UnitOfEnergy,
+    LIGHT_LUX,
     UnitOfPower,
 )
 from homeassistant.core import HomeAssistant
@@ -81,6 +82,20 @@ _SENSOR_METADATA = {
         SensorDeviceClass.ENERGY,
         UnitOfEnergy.KILO_WATT_HOUR,
         SensorStateClass.TOTAL_INCREASING,
+        1.0,
+    ),
+    "battery_level": (
+        "Battery",
+        SensorDeviceClass.BATTERY,
+        PERCENTAGE,
+        SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
+    "illuminance": (
+        "Illuminance",
+        SensorDeviceClass.ILLUMINANCE,
+        LIGHT_LUX,
+        SensorStateClass.MEASUREMENT,
         1.0,
     ),
 }
