@@ -98,6 +98,13 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
+    "light_level": (
+        "Light level",
+        None,
+        None,
+        None,
+        1.0,
+    ),
 }
 
 
