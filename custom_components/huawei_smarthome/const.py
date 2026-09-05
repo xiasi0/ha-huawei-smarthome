@@ -34,6 +34,7 @@ PROFILE_CDN_BASE_URL = "https://smarthome-drcn.dbankcdn.com"
 PROFILE_CDN_PATH = "/device/guide/{prod_id}/{prod_id}.json"
 
 DEVICE_SNAPSHOT_PATH = "/smart-life/v5/devices/info"
+DEVICE_DYNAMIC_DATA_PATH = "/smart-life/v5/devices/dynamic/data"
 HOME_SNAPSHOT_PATH = "/smart-life/v5/homes"
 DEVICE_DETAIL_PATH = "/smart-life/v2/devices/{dev_id}"
 MESSAGE_CENTER_LOGIN_PATH = "/message-center/v1/login"

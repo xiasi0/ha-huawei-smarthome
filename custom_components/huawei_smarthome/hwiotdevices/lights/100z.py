@@ -11,6 +11,7 @@ import uuid
 from ...const import OBSERVED_MQTT_FILTER
 from ...domain.models import RemoteDeviceDescriptor
 from ...mqtt_client import HuaweiMqttClient
+from ..state import HuaweiDeviceStateMixin
 
 PROD_ID = "100z"
 HA_PLATFORM = "light"
@@ -35,11 +36,12 @@ SUPPORTED_SERVICES = frozenset(
 StateListener = Callable[[], None]
 
 
-class HuaweiDevice:
+class HuaweiDevice(HuaweiDeviceStateMixin):
     """Runtime context and protocol mapping for one 100z device."""
 
     prod_id = PROD_ID
     ha_platform = HA_PLATFORM
+    state_services = SUPPORTED_SERVICES
 
     def __init__(
         self,
@@ -204,25 +206,17 @@ class HuaweiDevice:
             data = service.get("data")
             if (
                 not isinstance(sid, str)
-                or sid not in SUPPORTED_SERVICES
                 or not isinstance(data, Mapping)
             ):
                 continue
-            timestamp = service.get("ts")
-            if (
-                isinstance(timestamp, str)
-                and timestamp
-                and self._state_timestamps.get(sid)
-                and timestamp < self._state_timestamps[sid]
-            ):
-                continue
-            before = self._state.get(sid, {})
-            after = {**before, **dict(data)}
-            if after != before:
-                self._state[sid] = after
-                changed = True
-            if isinstance(timestamp, str) and timestamp:
-                self._state_timestamps[sid] = timestamp
+            changed = (
+                self._merge_service_state(
+                    sid,
+                    data,
+                    service.get("ts"),
+                )
+                or changed
+            )
         if changed:
             self._notify_state_changed()
         return changed

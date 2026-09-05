@@ -10,10 +10,11 @@ from typing import Any
 from urllib.parse import quote
 
 from ..const import (
+    CLOUD_ROUTE_SELECT_PATH,
     DEVICE_DETAIL_PATH,
+    DEVICE_DYNAMIC_DATA_PATH,
     DEVICE_SNAPSHOT_PATH,
     HOME_SNAPSHOT_PATH,
-    CLOUD_ROUTE_SELECT_PATH,
     MESSAGE_CENTER_LOGIN_PATH,
     SMART_HOME_IOS_APP_ID,
     SMART_HOME_USER_AGENT,
@@ -22,6 +23,7 @@ from ..domain.models import (
     AuthSession,
     MessageChannelSession,
     RemoteDeviceDescriptor,
+    RemoteDeviceState,
     RemoteDiscoverySnapshot,
     SmartHomeCloudRoute,
 )
@@ -33,12 +35,16 @@ from .errors import (
     RemoteOperationError,
     TransientNetworkError,
 )
-from .normalizers import normalize_device_detail, normalize_snapshot
+from .normalizers import (
+    normalize_device_detail,
+    normalize_dynamic_states,
+    normalize_snapshot,
+)
 from .transport import AsyncHttpTransport, HttpResponse, UrllibHttpTransport
 
 
 class SmartHomeDiscoveryApi:
-    """HTTP facade for account discovery and device details."""
+    """HTTP facade for account discovery and device state."""
 
     def __init__(
         self,
@@ -60,6 +66,35 @@ class SmartHomeDiscoveryApi:
             self._json(devices),
             self._json(homes),
         )
+
+    async def async_get_dynamic_states(
+        self,
+        session: AuthSession,
+        devices: Sequence[str],
+        *,
+        home_id: str | None = None,
+    ) -> tuple[RemoteDeviceState, ...]:
+        """Fetch the current state for a batch of known devices."""
+
+        device_ids = tuple(dict.fromkeys(device for device in devices if device))
+        if not device_ids:
+            return ()
+        body = json.dumps(
+            device_ids,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response = await self._request(
+            session,
+            DEVICE_DYNAMIC_DATA_PATH,
+            method="POST",
+            body=body,
+            extra_headers={
+                "Content-Type": "application/json",
+                **({"X-HomeId": home_id} if home_id else {}),
+            },
+        )
+        return normalize_dynamic_states(self._json(response))
 
     async def async_login_message_center(
         self,
@@ -230,7 +265,7 @@ class SmartHomeDiscoveryApi:
         }
         if extra_headers:
             headers.update(extra_headers)
-        if body is not None:
+        if body is not None and "Content-Type" not in headers:
             headers["Content-Type"] = "application/json;charset=UTF-8"
         response: HttpResponse | None = None
         for attempt in range(3):
