@@ -17,6 +17,7 @@ _SUPPORTED_PRODUCTS = {
     "20hz": import_module(".lights.20HZ", package=__package__).HuaweiDevice,
     "2f6r": import_module(".lights.2F6R", package=__package__).HuaweiDevice,
     "2kj0": import_module(".lights.2KJ0", package=__package__).HuaweiDevice,
+    "2oib": import_module(".lights.2OIB", package=__package__).HuaweiDevice,
 }
 
 
