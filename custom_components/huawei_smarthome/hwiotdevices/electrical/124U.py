@@ -19,7 +19,12 @@ PROFILE_MODEL = "124U"
 COMMAND_ACK_TIMEOUT = 10.0
 
 SERVICE_SWITCH = "switch"
-STATE_SERVICES = frozenset({SERVICE_SWITCH})
+SERVICE_POWER = "power"
+SERVICE_CONSUMPTION = "consumption"
+STATE_SERVICES = frozenset(
+    {SERVICE_SWITCH, SERVICE_POWER, SERVICE_CONSUMPTION}
+)
+ENERGY_SENSOR_KEYS = frozenset({"current", "consumption"})
 
 StateListener = Callable[[], None]
 
@@ -29,6 +34,7 @@ class HuaweiDevice:
 
     prod_id = PROD_ID
     ha_platform = HA_PLATFORM
+    energy_sensor_keys = ENERGY_SENSOR_KEYS
 
     def __init__(
         self,
@@ -98,6 +104,18 @@ class HuaweiDevice:
         if value is None:
             return None
         return value in (True, 1, "1")
+
+    @property
+    def current(self) -> int | None:
+        """Return the raw current value reported by the device."""
+
+        return self._int_value(SERVICE_POWER, "current")
+
+    @property
+    def consumption(self) -> int | None:
+        """Return the raw consumption value reported by the device."""
+
+        return self._int_value(SERVICE_CONSUMPTION, "consumption")
 
     def value(self, sid: str, name: str) -> Any:
         """Return one cached product characteristic."""
@@ -245,3 +263,18 @@ class HuaweiDevice:
     def _notify_state_changed(self) -> None:
         for listener in tuple(self._listeners):
             listener()
+
+    def _int_value(self, sid: str, name: str) -> int | None:
+        value = self.value(sid, name)
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        return None
