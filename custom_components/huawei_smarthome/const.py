@@ -43,6 +43,6 @@ HMS_LITE_TOKEN_PATH = "/smart-life/v2/hms-lite/token"
 OBSERVED_MQTT_PORT = 8883
 OBSERVED_MQTT_SUBSCRIPTION_QOS = 2
 OBSERVED_MQTT_FILTER = "/smartHome/signaltrans/v2/categories/command"
-PLATFORMS = ("light",)
+PLATFORMS = ("light", "switch")
 
 UNASSIGNED_HOME_ID = "__unassigned__"
