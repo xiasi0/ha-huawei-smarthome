@@ -37,6 +37,7 @@ class HuaweiDevice(HuaweiDeviceStateMixin):
 
     prod_id = PROD_ID
     ha_platform = HA_PLATFORM
+    state_services = STATE_SERVICES
     switch_keys = CHANNEL_SERVICE_IDS
     switch_names = SWITCH_NAMES
 
@@ -178,25 +179,17 @@ class HuaweiDevice(HuaweiDeviceStateMixin):
             data = service.get("data")
             if (
                 not isinstance(sid, str)
-                or sid not in STATE_SERVICES
                 or not isinstance(data, Mapping)
             ):
                 continue
-            timestamp = service.get("ts")
-            if (
-                isinstance(timestamp, str)
-                and timestamp
-                and self._state_timestamps.get(sid)
-                and timestamp < self._state_timestamps[sid]
-            ):
-                continue
-            before = self._state.get(sid, {})
-            after = {**before, **dict(data)}
-            if after != before:
-                self._state[sid] = after
-                changed = True
-            if isinstance(timestamp, str) and timestamp:
-                self._state_timestamps[sid] = timestamp
+            changed = (
+                self._merge_service_state(
+                    sid,
+                    data,
+                    service.get("ts"),
+                )
+                or changed
+            )
         if changed:
             self._notify_state_changed()
         return changed

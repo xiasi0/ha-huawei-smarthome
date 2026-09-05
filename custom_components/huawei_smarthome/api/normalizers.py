@@ -10,6 +10,7 @@ from ..domain.models import (
     DeviceKey,
     Operation,
     RemoteDeviceDescriptor,
+    RemoteDeviceState,
     RemoteDiscoverySnapshot,
     RemoteHome,
     RemoteRoom,
@@ -90,6 +91,50 @@ def normalize_device_detail(payload: Any) -> RemoteDeviceDescriptor:
     return _normalize_device(candidate, datetime.now(timezone.utc))
 
 
+def normalize_dynamic_states(
+    payload: Any,
+    *,
+    received_at: datetime | None = None,
+) -> tuple[RemoteDeviceState, ...]:
+    """Normalize the batch device-state response."""
+
+    received_at = received_at or datetime.now(timezone.utc)
+    if not isinstance(payload, list):
+        raise InvalidProtocolDataError(
+            "dynamic device-state response is not a JSON list"
+        )
+    states: list[RemoteDeviceState] = []
+    seen_ids: set[str] = set()
+    for item in payload:
+        if not isinstance(item, Mapping):
+            continue
+        dev_id = _text(item.get("devId"))
+        if not dev_id:
+            continue
+        if dev_id in seen_ids:
+            raise InvalidProtocolDataError(
+                f"dynamic device-state response contains duplicate device {dev_id!r}"
+            )
+        seen_ids.add(dev_id)
+        services: dict[str, RemoteServiceState] = {}
+        services_raw = item.get("services")
+        if isinstance(services_raw, list):
+            for service in services_raw:
+                normalized = _normalize_service(service, received_at)
+                if normalized is not None:
+                    services[normalized.sid] = normalized
+        online = _normalize_online(item)
+        states.append(
+            RemoteDeviceState(
+                dev_id=dev_id,
+                services=services,
+                online=online,
+                received_at=received_at,
+            )
+        )
+    return tuple(states)
+
+
 def _normalize_homes(payload: Mapping[str, Any]) -> tuple[RemoteHome, ...]:
     house_infos = payload.get("houseInfos")
     if not isinstance(house_infos, list):
@@ -151,10 +196,7 @@ def _normalize_device(
         }
         and _is_json_value(child)
     }
-    online = item.get("online")
-    if not isinstance(online, bool):
-        status = _text(item.get("status"))
-        online = True if status == "online" else False if status == "offline" else None
+    online = _normalize_online(item)
     return RemoteDeviceDescriptor(
         home_id=canonical_home_id(item.get("homeId")),
         dev_id=dev_id,
@@ -173,7 +215,7 @@ def _normalize_device(
         if isinstance(info.get("protType"), (str, int)) else None,
         operations=operations,
         service_states=services,
-        online=online if isinstance(online, bool) else None,
+        online=online,
         tags={str(key): child for key, child in tags.items() if _is_json_value(child)},
         third_party_id=_text(item.get("thirdPartyId")),
         registry_time=_text(item.get("registryTime")),
@@ -220,6 +262,20 @@ def _find_device_object(value: Any) -> Mapping[str, Any] | None:
             found = _find_device_object(child)
             if found is not None:
                 return found
+    return None
+
+
+def _normalize_online(value: Mapping[str, Any]) -> bool | None:
+    """Normalize the explicit or textual device availability value."""
+
+    online = value.get("online")
+    if isinstance(online, bool):
+        return online
+    status = _text(value.get("status"))
+    if status == "online":
+        return True
+    if status == "offline":
+        return False
     return None
 
 

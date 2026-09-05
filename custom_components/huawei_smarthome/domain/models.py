@@ -151,6 +151,16 @@ class RemoteServiceState:
 
 
 @dataclass(frozen=True, slots=True)
+class RemoteDeviceState:
+    """A device state returned by the dynamic state snapshot endpoint."""
+
+    dev_id: str
+    services: Mapping[str, RemoteServiceState] = field(default_factory=dict)
+    online: bool | None = None
+    received_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RemoteDeviceDescriptor:
     """Device instance data from the SmartHome discovery API."""
 
@@ -239,6 +249,21 @@ def parse_remote_timestamp(value: Any) -> datetime | None:
         return datetime.strptime(body, pattern).replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def is_older_remote_timestamp(
+    incoming: str | None,
+    previous: str | None,
+) -> bool:
+    """Return whether one SmartHome timestamp precedes another."""
+
+    if not incoming or not previous:
+        return False
+    incoming_at = parse_remote_timestamp(incoming)
+    previous_at = parse_remote_timestamp(previous)
+    if incoming_at is not None and previous_at is not None:
+        return incoming_at < previous_at
+    return incoming < previous
 
 
 def datetime_after_now(value: datetime, margin_seconds: int) -> bool:

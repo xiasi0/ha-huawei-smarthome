@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 import logging
@@ -18,6 +18,7 @@ from .const import (
     OBSERVED_MQTT_FILTER,
     OBSERVED_MQTT_PORT,
     OBSERVED_MQTT_SUBSCRIPTION_QOS,
+    UNASSIGNED_HOME_ID,
 )
 from .domain.models import (
     AccountState,
@@ -25,7 +26,9 @@ from .domain.models import (
     ConnectionState,
     MqttConnectionSettings,
     RemoteDeviceDescriptor,
+    RemoteDeviceState,
     RemoteDiscoverySnapshot,
+    is_older_remote_timestamp,
 )
 from .errors import ReauthenticationRequired
 from .hwiotdevices.registry import create_hwiot_device
@@ -33,6 +36,7 @@ from .mqtt_client import HuaweiMqttClient
 from .storage.credentials import CredentialBindingError
 from .storage.profile_metadata import ProductMetadataStore
 from .storage.state import AccountStateStore
+from .sync_coordinator import SmartHomeSyncCoordinator
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -96,13 +100,16 @@ class HuaweiSmartHomeClient:
         self.session: AuthSession | None = None
         self.session_manager: SessionManager | None = None
         self._excluded_device_ids: frozenset[str] = frozenset()
-        self._refresh_lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task[None] | None = None
         self._operation_lock = asyncio.Lock()
         self._hwiot_devices: dict[tuple[str, str], Any] = {}
         self._reconnect_min = reconnect_min
         self._reconnect_max = reconnect_max
         self._started = False
+        self._sync = SmartHomeSyncCoordinator(
+            full_sync=self._async_full_sync,
+            state_sync=self._async_state_sync,
+        )
 
     @property
     def devices(self) -> Mapping[tuple[str, str], RemoteDeviceDescriptor]:
@@ -157,10 +164,10 @@ class HuaweiSmartHomeClient:
                 session = await self.session_manager.async_ensure_oauth_valid()
             session = await self.session_manager.async_ensure_hms_valid()
             self.session = session
-            await self._discover_with_token_recovery(session)
+            await self._sync.async_request_full_sync("startup")
             if self.mqtt_enabled:
                 try:
-                    await self._connect_mqtt(session)
+                    await self._connect_mqtt(self.session or session)
                 except ReauthenticationRequired:
                     raise
                 except Exception as error:
@@ -188,29 +195,14 @@ class HuaweiSmartHomeClient:
     async def async_request_refresh(self) -> AccountState:
         """Refresh the account device snapshot."""
 
-        async with self._refresh_lock:
-            try:
-                session = await self._ensure_hms_session()
-                await self._discover_with_token_recovery(session)
-            except (
-                ReauthenticationRequired,
-                CredentialBindingError,
-            ) as error:
-                self.state.connection = ConnectionState.REAUTH_REQUIRED
-                self.state.last_error = "Huawei SmartHome authentication required"
-                raise ReauthenticationRequired(
-                    "Huawei SmartHome authentication required"
-                ) from error
-            except Exception:
-                self.state.connection = ConnectionState.ERROR
-                self.state.last_error = "Huawei SmartHome discovery failed"
-                raise
+        await self._sync.async_request_full_sync("manual")
         return self.state
 
     async def async_stop(self) -> None:
         """Stop MQTT and the account session."""
 
         self._started = False
+        await self._sync.async_stop()
         task, self._reconnect_task = self._reconnect_task, None
         if task is not None:
             task.cancel()
@@ -240,6 +232,20 @@ class HuaweiSmartHomeClient:
         self.state.devices = devices
         self._sync_hwiot_devices()
         self.state.device_home_index = _device_home_index(snapshot)
+        try:
+            await self._refresh_dynamic_states(
+                session,
+                devices.values(),
+                persist=False,
+            )
+        except AuthExpiredError:
+            raise
+        except Exception as error:
+            _LOGGER.warning(
+                "Huawei SmartHome initial state snapshot failed: %s: %s",
+                type(error).__name__,
+                str(error),
+            )
         self.state.revision += 1
         self.state.last_snapshot_at = snapshot.received_at
         self.state.last_success_at = snapshot.received_at
@@ -251,6 +257,48 @@ class HuaweiSmartHomeClient:
             else ConnectionState.READY
         )
         await self.state_store.async_save(self.state)
+
+    async def _async_full_sync(self, _reason: str) -> None:
+        """Run a complete discovery and state synchronization pass."""
+
+        try:
+            session = await self._ensure_hms_session()
+            await self._discover_with_token_recovery(session)
+        except (
+            ReauthenticationRequired,
+            CredentialBindingError,
+        ) as error:
+            self.state.connection = ConnectionState.REAUTH_REQUIRED
+            self.state.last_error = "Huawei SmartHome authentication required"
+            raise ReauthenticationRequired(
+                "Huawei SmartHome authentication required"
+            ) from error
+        except Exception:
+            self.state.connection = ConnectionState.ERROR
+            self.state.last_error = "Huawei SmartHome discovery failed"
+            raise
+
+    async def _async_state_sync(self, _reason: str) -> None:
+        """Refresh current device state without rebuilding topology."""
+
+        try:
+            session = await self._ensure_hms_session()
+            await self._refresh_dynamic_states_with_token_recovery(session)
+        except (
+            ReauthenticationRequired,
+            CredentialBindingError,
+        ) as error:
+            self.state.connection = ConnectionState.REAUTH_REQUIRED
+            self.state.last_error = "Huawei SmartHome authentication required"
+            raise ReauthenticationRequired(
+                "Huawei SmartHome authentication required"
+            ) from error
+        except Exception as error:
+            _LOGGER.warning(
+                "Huawei SmartHome state snapshot failed: %s: %s",
+                type(error).__name__,
+                str(error),
+            )
 
     def _scope_snapshot(
         self,
@@ -340,6 +388,107 @@ class HuaweiSmartHomeClient:
             ),
         )
 
+    async def _refresh_dynamic_states_with_token_recovery(
+        self,
+        session: AuthSession,
+    ) -> None:
+        """Retry a dynamic state snapshot once after token expiry."""
+
+        try:
+            await self._refresh_dynamic_states(session)
+        except AuthExpiredError:
+            if self.session_manager is None:
+                raise
+            session = await self.session_manager.async_refresh_hms_lite(force=True)
+            self.session = session
+            await self._refresh_dynamic_states(session)
+
+    async def _refresh_dynamic_states(
+        self,
+        session: AuthSession,
+        devices: Iterable[RemoteDeviceDescriptor] | None = None,
+        *,
+        persist: bool = True,
+    ) -> bool:
+        """Fetch and apply the current state for the selected devices."""
+
+        getter = getattr(self.api, "async_get_dynamic_states", None)
+        if not callable(getter):
+            return False
+        source = tuple(
+            devices if devices is not None else self.state.devices.values()
+        )
+        devices_by_home: dict[str | None, list[str]] = {}
+        for device in source:
+            if (
+                (device.node_type or "").strip().upper() == "GROUP"
+                or not device.dev_id
+            ):
+                continue
+            home_id = (
+                None
+                if device.home_id == UNASSIGNED_HOME_ID
+                else device.home_id
+            )
+            devices_by_home.setdefault(home_id, []).append(device.dev_id)
+        if not devices_by_home:
+            return False
+        states: list[RemoteDeviceState] = []
+        for home_id, device_ids_raw in devices_by_home.items():
+            device_ids = tuple(dict.fromkeys(device_ids_raw))
+            if isinstance(self.api, SmartHomeDiscoveryApi):
+                states.extend(
+                    await getter(session, device_ids, home_id=home_id)
+                )
+            else:
+                states.extend(await getter(session, device_ids))
+        state_batch = tuple(states)
+        self._apply_dynamic_states(state_batch)
+        if persist:
+            received_at = max(
+                (
+                    state.received_at
+                    for state in state_batch
+                    if state.received_at is not None
+                ),
+                default=datetime.now(timezone.utc),
+            )
+            self.state.revision += 1
+            self.state.last_snapshot_at = received_at
+            self.state.last_success_at = received_at
+            self.state.stale_since = None
+            self.state.last_error = None
+            await self.state_store.async_save(self.state)
+        return True
+
+    def _apply_dynamic_states(
+        self,
+        states: tuple[RemoteDeviceState, ...],
+    ) -> bool:
+        """Merge dynamic state into descriptors and live product objects."""
+
+        updates = {state.dev_id: state for state in states}
+        changed = False
+        for key, descriptor in tuple(self.state.devices.items()):
+            state = updates.get(descriptor.dev_id)
+            if state is None:
+                continue
+            merged = _merge_dynamic_state(descriptor, state)
+            if merged != descriptor:
+                self.state.devices[key] = merged
+                changed = True
+            runtime = self._hwiot_devices.get(key)
+            if runtime is None:
+                continue
+            apply_snapshot = getattr(runtime, "apply_state_snapshot", None)
+            if callable(apply_snapshot):
+                changed = (
+                    apply_snapshot(state.services, online=state.online)
+                    or changed
+                )
+            runtime.update_descriptor(merged)
+        return changed
+
     async def _discover_with_token_recovery(
         self,
         session: AuthSession,
@@ -405,6 +554,7 @@ class HuaweiSmartHomeClient:
         ):
             try:
                 await self._connect_mqtt(session)
+                self._sync.schedule_state_sync("mqtt_reconnect")
             except ReauthenticationRequired:
                 raise
             except Exception as error:
@@ -460,6 +610,7 @@ class HuaweiSmartHomeClient:
                 session = await self.session_manager.async_ensure_oauth_valid()
                 session = await self.session_manager.async_ensure_hms_valid()
                 await self._connect_mqtt(session)
+                await self._sync.async_request_state_sync("mqtt_reconnect")
                 delay = self._reconnect_min
             except ReauthenticationRequired:
                 self.state.connection = ConnectionState.REAUTH_REQUIRED
@@ -488,6 +639,8 @@ class HuaweiSmartHomeClient:
         """Route one MQTT payload to the matching product devices."""
 
         self.state.last_event_at = datetime.now(timezone.utc)
+        if self._started and self._sync.is_topology_event(payload):
+            self._sync.schedule_full_sync("mqtt_topology_event")
         for device in tuple(self._hwiot_devices.values()):
             device.handle_mqtt_message(topic, payload)
 
@@ -558,4 +711,36 @@ def _merge_device_detail(
         protocol_type=detail.protocol_type or device.protocol_type,
         service_states=detail.service_states or device.service_states,
         online=detail.online if detail.online is not None else device.online,
+    )
+
+
+def _merge_dynamic_state(
+    device: RemoteDeviceDescriptor,
+    state: RemoteDeviceState,
+) -> RemoteDeviceDescriptor:
+    """Merge one dynamic state response into a device descriptor."""
+
+    services = dict(device.service_states)
+    for sid, incoming in state.services.items():
+        previous = services.get(sid)
+        if (
+            previous is not None
+            and is_older_remote_timestamp(
+                incoming.reported_timestamp,
+                previous.reported_timestamp,
+            )
+        ):
+            continue
+        if previous is None:
+            services[sid] = incoming
+            continue
+        services[sid] = replace(
+            incoming,
+            service_type=incoming.service_type or previous.service_type,
+            data={**previous.data, **incoming.data},
+        )
+    return replace(
+        device,
+        service_states=services,
+        online=state.online if state.online is not None else device.online,
     )
