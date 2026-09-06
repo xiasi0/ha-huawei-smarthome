@@ -10,6 +10,7 @@ from ..mqtt_client import HuaweiMqttClient
 
 
 _SUPPORTED_PRODUCTS = {
+    "113c": import_module(".security.113C", package=__package__).HuaweiDevice,
     "108t": import_module(".hvac.108T", package=__package__).HuaweiDevice,
     "2qbo": import_module(".hvac.2QBO", package=__package__).HuaweiDevice,
     "100z": import_module(".lights.100z", package=__package__).HuaweiDevice,
