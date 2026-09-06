@@ -502,10 +502,15 @@ class PahoMqttTransport:
         _userdata: Any,
         message: Any,
     ) -> None:
-        if self._loop is None or self._message_handler is None:
-            return
         topic = getattr(message, "topic", "")
         payload = getattr(message, "payload", b"")
+        _LOGGER.debug(
+            "Huawei SmartHome MQTT broker message received: topic=%s payload=%r",
+            topic,
+            payload,
+        )
+        if self._loop is None or self._message_handler is None:
+            return
         if not isinstance(topic, str) or not isinstance(payload, bytes):
             return
         self._loop.call_soon_threadsafe(
