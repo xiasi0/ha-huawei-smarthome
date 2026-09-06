@@ -24,7 +24,10 @@ async def async_setup_entry(
     client = entry.runtime_data
     entities = []
     for device in client.hwiot_devices.values():
-        if getattr(device, "ha_platform", None) == "switch":
+        if (
+            getattr(device, "ha_platform", None) == "switch"
+            and getattr(device, "expose_aggregate_switch", True)
+        ):
             entities.append(HuaweiSmartHomeSwitch(device))
         for key in getattr(device, "switch_keys", ()):
             entities.append(
