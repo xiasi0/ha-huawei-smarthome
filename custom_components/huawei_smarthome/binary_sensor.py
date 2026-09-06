@@ -83,14 +83,19 @@ class HuaweiSmartHomePresenceSensor(BinarySensorEntity):
 
 
 class HuaweiSmartHomeFeatureBinarySensor(BinarySensorEntity):
-    """Project one product-specific presence feature as a binary sensor."""
+    """Project one product-specific binary feature as a binary sensor."""
 
     def __init__(self, device: Any, key: str, name: str) -> None:
         self._device = device
         self._key = key
         self._attr_unique_id = f"{device.home_id}_{device.dev_id}_{key}"
         self._attr_name = name
-        self._attr_device_class = BinarySensorDeviceClass.OCCUPANCY
+        device_class = getattr(
+            device,
+            "binary_sensor_device_classes",
+            {},
+        ).get(key, BinarySensorDeviceClass.OCCUPANCY)
+        self._attr_device_class = BinarySensorDeviceClass(device_class)
         self._attr_has_entity_name = True
         self._attr_should_poll = False
 
