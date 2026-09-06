@@ -13,6 +13,7 @@ _SUPPORTED_PRODUCTS = {
     "113c": import_module(".security.113C", package=__package__).HuaweiDevice,
     "108t": import_module(".hvac.108T", package=__package__).HuaweiDevice,
     "2qbo": import_module(".hvac.2QBO", package=__package__).HuaweiDevice,
+    "21g6": import_module(".hvac.21G6", package=__package__).HuaweiDevice,
     "100z": import_module(".lights.100z", package=__package__).HuaweiDevice,
     "105m": import_module(".electrical.105M", package=__package__).HuaweiDevice,
     "2mff": import_module(".electrical.2MFF", package=__package__).HuaweiDevice,

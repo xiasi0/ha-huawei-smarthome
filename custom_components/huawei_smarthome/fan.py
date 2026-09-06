@@ -35,7 +35,7 @@ class HuaweiSmartHomeFan(FanEntity):
     def __init__(self, device: Any) -> None:
         self._device = device
         self._attr_unique_id = f"{device.home_id}_{device.dev_id}_fan"
-        self._attr_name = "Air purifier"
+        self._attr_name = getattr(device, "fan_entity_name", "Air purifier")
         self._attr_has_entity_name = True
         self._attr_should_poll = False
         self._attr_supported_features = (
