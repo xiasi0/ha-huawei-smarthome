@@ -127,6 +127,13 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
+    "speaker_state": (
+        "Speaker state",
+        None,
+        None,
+        None,
+        1.0,
+    ),
     "illuminance": (
         "Illuminance",
         SensorDeviceClass.ILLUMINANCE,
@@ -199,7 +206,7 @@ class HuaweiSmartHomeSensor(SensorEntity):
         return self._device.available
 
     @property
-    def native_value(self) -> int | float | None:
+    def native_value(self) -> str | int | float | None:
         value = getattr(self._device, self._key)
         if value is None or self._value_scale == 1.0:
             return value

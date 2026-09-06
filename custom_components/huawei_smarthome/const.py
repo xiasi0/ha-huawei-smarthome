@@ -52,6 +52,7 @@ PLATFORMS = (
     "binary_sensor",
     "event",
     "select",
+    "media_player",
 )
 
 UNASSIGNED_HOME_ID = "__unassigned__"
