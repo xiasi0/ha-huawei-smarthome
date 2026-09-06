@@ -43,6 +43,13 @@ _SENSOR_METADATA = {
         SensorStateClass.TOTAL_INCREASING,
         0.001,
     ),
+    "energy_consumption": (
+        "Energy consumption",
+        SensorDeviceClass.ENERGY,
+        UnitOfEnergy.KILO_WATT_HOUR,
+        SensorStateClass.TOTAL_INCREASING,
+        1.0,
+    ),
     "pm2p5": (
         "PM2.5",
         SensorDeviceClass.PM25,

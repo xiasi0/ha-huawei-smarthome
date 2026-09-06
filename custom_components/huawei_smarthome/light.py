@@ -42,9 +42,10 @@ class HuaweiSmartHomeLight(LightEntity):
     def __init__(self, device: Any) -> None:
         self._device = device
         self._attr_unique_id = (
-            f"{device.home_id}_{device.dev_id}_light"
+            f"{device.home_id}_{device.dev_id}_"
+            f"{getattr(device, 'light_key', 'light')}"
         )
-        self._attr_name = "Light"
+        self._attr_name = getattr(device, "light_name", "Light")
         self._attr_has_entity_name = True
         self._attr_should_poll = False
         supported_color_modes = getattr(
