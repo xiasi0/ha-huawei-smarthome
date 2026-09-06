@@ -21,6 +21,7 @@ _SUPPORTED_PRODUCTS = {
     "2mff": import_module(".electrical.2MFF", package=__package__).HuaweiDevice,
     "2bn0": import_module(".electrical.2BN0", package=__package__).HuaweiDevice,
     "2bsn": import_module(".electrical.2BSN", package=__package__).HuaweiDevice,
+    "2kd9": import_module(".electrical.2KD9", package=__package__).HuaweiDevice,
     "124u": import_module(".electrical.124U", package=__package__).HuaweiDevice,
     "148m": import_module(".electrical.148M", package=__package__).HuaweiDevice,
     "20hz": import_module(".lights.20HZ", package=__package__).HuaweiDevice,
