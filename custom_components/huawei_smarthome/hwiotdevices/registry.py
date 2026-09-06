@@ -12,9 +12,11 @@ from ..mqtt_client import HuaweiMqttClient
 _SUPPORTED_PRODUCTS = {
     "108t": import_module(".hvac.108T", package=__package__).HuaweiDevice,
     "100z": import_module(".lights.100z", package=__package__).HuaweiDevice,
+    "105m": import_module(".electrical.105M", package=__package__).HuaweiDevice,
     "2mff": import_module(".electrical.2MFF", package=__package__).HuaweiDevice,
     "2bn0": import_module(".electrical.2BN0", package=__package__).HuaweiDevice,
     "124u": import_module(".electrical.124U", package=__package__).HuaweiDevice,
+    "148m": import_module(".electrical.148M", package=__package__).HuaweiDevice,
     "20hz": import_module(".lights.20HZ", package=__package__).HuaweiDevice,
     "2f6r": import_module(".lights.2F6R", package=__package__).HuaweiDevice,
     "2kj0": import_module(".lights.2KJ0", package=__package__).HuaweiDevice,
