@@ -31,6 +31,7 @@ _SUPPORTED_PRODUCTS = {
     "21jc": import_module(".lights.21JC", package=__package__).HuaweiDevice,
     "133o": import_module(".lights.133O", package=__package__).HuaweiDevice,
     "2eo8": import_module(".lights.2EO8", package=__package__).HuaweiDevice,
+    "2rh9": import_module(".lights.2RH9", package=__package__).HuaweiDevice,
     "zg0i": import_module(".lights.ZG0I", package=__package__).HuaweiDevice,
     "zg0k": import_module(".lights.ZG0K", package=__package__).HuaweiDevice,
     "2rjb": import_module(".security.2RJB", package=__package__).HuaweiDevice,
