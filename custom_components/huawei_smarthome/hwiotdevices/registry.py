@@ -19,6 +19,7 @@ _SUPPORTED_PRODUCTS = {
     "2gb5": import_module(".security.2GB5", package=__package__).HuaweiDevice,
     "21do": import_module(".security.21DO", package=__package__).HuaweiDevice,
     "108t": import_module(".hvac.108T", package=__package__).HuaweiDevice,
+    "2b8i": import_module(".hvac.2B8I", package=__package__).HuaweiDevice,
     "2qbo": import_module(".hvac.2QBO", package=__package__).HuaweiDevice,
     "21g6": import_module(".hvac.21G6", package=__package__).HuaweiDevice,
     "100z": import_module(".lights.100z", package=__package__).HuaweiDevice,

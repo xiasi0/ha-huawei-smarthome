@@ -99,6 +99,13 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
+    "filter_remaining_time": (
+        "Filter remaining time",
+        None,
+        "h",
+        SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
     "power": (
         "Current power",
         SensorDeviceClass.POWER,
