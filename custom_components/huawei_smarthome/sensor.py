@@ -127,6 +127,13 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
+    "rotation_mode": (
+        "Rotation mode",
+        None,
+        None,
+        None,
+        1.0,
+    ),
     "speaker_state": (
         "Speaker state",
         None,
