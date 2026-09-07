@@ -24,6 +24,7 @@ _SUPPORTED_PRODUCTS = {
     "2qbo": import_module(".hvac.2QBO", package=__package__).HuaweiDevice,
     "21g6": import_module(".hvac.21G6", package=__package__).HuaweiDevice,
     "100z": import_module(".lights.100z", package=__package__).HuaweiDevice,
+    "140b": import_module(".covers.140B", package=__package__).HuaweiDevice,
     "105m": import_module(".electrical.105M", package=__package__).HuaweiDevice,
     "188b": import_module(".electrical.188B", package=__package__).HuaweiDevice,
     "2jo1": import_module(".electrical.2JO1", package=__package__).HuaweiDevice,

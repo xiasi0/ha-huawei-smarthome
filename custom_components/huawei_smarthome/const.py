@@ -46,6 +46,7 @@ OBSERVED_MQTT_SUBSCRIPTION_QOS = 2
 OBSERVED_MQTT_FILTER = "/smartHome/signaltrans/v2/categories/command"
 PLATFORMS = (
     "light",
+    "cover",
     "switch",
     "sensor",
     "fan",
