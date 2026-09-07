@@ -13,6 +13,7 @@ _SUPPORTED_PRODUCTS = {
     "x005": import_module(".media.X005", package=__package__).HuaweiDevice,
     "001t": import_module(".media.001T", package=__package__).HuaweiDevice,
     "x0a2": import_module(".media.X0A2", package=__package__).HuaweiDevice,
+    "x007": import_module(".media.X007", package=__package__).HuaweiDevice,
     "113b": import_module(".security.113B", package=__package__).HuaweiDevice,
     "113c": import_module(".security.113C", package=__package__).HuaweiDevice,
     "2gb4": import_module(".security.2GB4", package=__package__).HuaweiDevice,

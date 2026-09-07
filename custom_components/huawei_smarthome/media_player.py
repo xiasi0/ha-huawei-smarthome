@@ -43,14 +43,16 @@ class HuaweiSmartHomeMediaPlayer(MediaPlayerEntity):
         self._attr_name = "Speaker"
         self._attr_has_entity_name = True
         self._attr_should_poll = False
-        self._attr_supported_features = (
+        supported_features = (
             MediaPlayerEntityFeature.PLAY
             | MediaPlayerEntityFeature.PAUSE
             | MediaPlayerEntityFeature.STOP
             | MediaPlayerEntityFeature.PREVIOUS_TRACK
             | MediaPlayerEntityFeature.NEXT_TRACK
-            | MediaPlayerEntityFeature.VOLUME_SET
         )
+        if getattr(device, "supports_volume_control", True):
+            supported_features |= MediaPlayerEntityFeature.VOLUME_SET
+        self._attr_supported_features = supported_features
         self._attr_media_content_type = "music"
 
     @property
@@ -80,11 +82,11 @@ class HuaweiSmartHomeMediaPlayer(MediaPlayerEntity):
 
     @property
     def volume_level(self) -> float | None:
-        return self._device.volume_level
+        return getattr(self._device, "volume_level", None)
 
     @property
     def is_volume_muted(self) -> bool | None:
-        return self._device.is_volume_muted
+        return getattr(self._device, "is_volume_muted", None)
 
     @property
     def media_title(self) -> str | None:
