@@ -64,6 +64,13 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
+    "gas_concentration": (
+        "Gas concentration",
+        None,
+        "ppm",
+        SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
     "formaldehyde": (
         "Formaldehyde",
         None,
