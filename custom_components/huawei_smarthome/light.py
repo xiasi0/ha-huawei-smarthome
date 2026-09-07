@@ -28,24 +28,37 @@ async def async_setup_entry(
 
     del hass
     client = entry.runtime_data
-    entities = [
-        HuaweiSmartHomeLight(device)
-        for device in client.hwiot_devices.values()
-        if getattr(device, "ha_platform", None) == "light"
-    ]
+    entities = []
+    for device in client.hwiot_devices.values():
+        if getattr(device, "ha_platform", None) != "light":
+            continue
+        light_keys = getattr(device, "light_keys", ())
+        if light_keys:
+            entities.extend(
+                HuaweiSmartHomeLight(device, key)
+                for key in light_keys
+            )
+        else:
+            entities.append(HuaweiSmartHomeLight(device))
     async_add_entities(entities)
 
 
 class HuaweiSmartHomeLight(LightEntity):
     """Project one product device as a Home Assistant light."""
 
-    def __init__(self, device: Any) -> None:
+    def __init__(self, device: Any, light_key: str | None = None) -> None:
         self._device = device
+        self._light_key = light_key
+        entity_key = light_key or getattr(device, "light_key", "light")
+        light_names = getattr(device, "light_names", {})
         self._attr_unique_id = (
             f"{device.home_id}_{device.dev_id}_"
-            f"{getattr(device, 'light_key', 'light')}"
+            f"{entity_key}"
         )
-        self._attr_name = getattr(device, "light_name", "Light")
+        self._attr_name = light_names.get(
+            light_key,
+            getattr(device, "light_name", "Light"),
+        )
         self._attr_has_entity_name = True
         self._attr_should_poll = False
         supported_color_modes = getattr(
@@ -91,33 +104,59 @@ class HuaweiSmartHomeLight(LightEntity):
 
     @property
     def is_on(self) -> bool | None:
+        if self._light_key is not None:
+            return self._device.light_is_on(self._light_key)
         return self._device.is_on
 
     @property
     def brightness(self) -> int | None:
+        if self._light_key is not None:
+            return self._device.light_brightness(self._light_key)
         return self._device.brightness
 
     @property
     def rgb_color(self) -> tuple[int, int, int] | None:
+        if self._light_key is not None:
+            return self._device.light_rgb_color(self._light_key)
         return self._device.rgb_color
 
     @property
     def color_temp_kelvin(self) -> int | None:
+        if self._light_key is not None:
+            return self._device.light_color_temperature(self._light_key)
         return self._device.color_temperature
 
     @property
     def color_mode(self) -> ColorMode | None:
         supported = self._attr_supported_color_modes
-        colour_mode = getattr(self._device, "colour_mode", None)
+        if self._light_key is not None:
+            colour_mode_getter = getattr(
+                self._device,
+                "light_colour_mode",
+                None,
+            )
+            colour_mode = (
+                colour_mode_getter(self._light_key)
+                if callable(colour_mode_getter)
+                else None
+            )
+            rgb_color = self._device.light_rgb_color(self._light_key)
+            color_temperature = self._device.light_color_temperature(
+                self._light_key
+            )
+        else:
+            colour_mode = getattr(self._device, "colour_mode", None)
+            rgb_color = self._device.rgb_color
+            color_temperature = self._device.color_temperature
         if colour_mode == 1 and ColorMode.COLOR_TEMP in supported:
             return ColorMode.COLOR_TEMP
         if colour_mode == 0 and ColorMode.RGB in supported:
             return ColorMode.RGB
-        if ColorMode.RGB in supported and self._device.rgb_color is not None:
+        if ColorMode.RGB in supported and rgb_color is not None:
             return ColorMode.RGB
         if (
             ColorMode.COLOR_TEMP in supported
-            and self._device.color_temperature is not None
+            and color_temperature is not None
         ):
             return ColorMode.COLOR_TEMP
         if ColorMode.RGB in supported:
@@ -137,6 +176,14 @@ class HuaweiSmartHomeLight(LightEntity):
         self._device.remove_state_listener(self._state_changed)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
+        if self._light_key is not None:
+            await self._device.async_turn_on_for_light(
+                self._light_key,
+                brightness=kwargs.get(ATTR_BRIGHTNESS),
+                rgb_color=kwargs.get(ATTR_RGB_COLOR),
+                color_temperature=kwargs.get(ATTR_COLOR_TEMP_KELVIN),
+            )
+            return
         await self._device.async_turn_on(
             brightness=kwargs.get(ATTR_BRIGHTNESS),
             rgb_color=kwargs.get(ATTR_RGB_COLOR),
@@ -144,6 +191,10 @@ class HuaweiSmartHomeLight(LightEntity):
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
+        if self._light_key is not None:
+            del kwargs
+            await self._device.async_turn_off_for_light(self._light_key)
+            return
         del kwargs
         await self._device.async_turn_off()
 
