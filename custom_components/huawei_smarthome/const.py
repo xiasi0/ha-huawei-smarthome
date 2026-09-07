@@ -50,8 +50,10 @@ PLATFORMS = (
     "switch",
     "sensor",
     "fan",
+    "humidifier",
     "binary_sensor",
     "event",
+    "number",
     "select",
     "media_player",
 )
