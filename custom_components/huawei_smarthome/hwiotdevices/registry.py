@@ -27,6 +27,7 @@ _SUPPORTED_PRODUCTS = {
     "100z": import_module(".lights.100z", package=__package__).HuaweiDevice,
     "140b": import_module(".covers.140B", package=__package__).HuaweiDevice,
     "2aoq": import_module(".covers.2AOQ", package=__package__).HuaweiDevice,
+    "2ihj": import_module(".covers.2IHJ", package=__package__).HuaweiDevice,
     "105m": import_module(".electrical.105M", package=__package__).HuaweiDevice,
     "105d": import_module(".electrical.105D", package=__package__).HuaweiDevice,
     "188b": import_module(".electrical.188B", package=__package__).HuaweiDevice,
