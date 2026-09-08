@@ -76,6 +76,7 @@ _SUPPORTED_PRODUCTS = {
     "zg1f": import_module(".lights.ZG1F", package=__package__).HuaweiDevice,
     "1014": import_module(".security.1014", package=__package__).HuaweiDevice,
     "101g": import_module(".security.101g", package=__package__).HuaweiDevice,
+    "2ge7": import_module(".security.2GE7", package=__package__).HuaweiDevice,
     "2acb": import_module(".security.2ACB", package=__package__).HuaweiDevice,
     "208b": import_module(".security.208B", package=__package__).HuaweiDevice,
     "2rjb": import_module(".security.2RJB", package=__package__).HuaweiDevice,
