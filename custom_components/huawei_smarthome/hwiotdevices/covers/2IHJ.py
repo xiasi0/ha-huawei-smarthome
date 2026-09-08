@@ -105,7 +105,7 @@ class HuaweiDevice(HuaweiDeviceStateMixin):
         value = self._int_value(SERVICE_OPENER, "current")
         if value is None:
             return None
-        return self._ha_position(value)
+        return min(max(value, 0), 100)
 
     @property
     def action(self) -> int | None:
@@ -217,12 +217,12 @@ class HuaweiDevice(HuaweiDeviceStateMixin):
         await self.async_set_service(SERVICE_ACTION, {"action": ACTION_PAUSE})
 
     async def async_set_cover_position(self, position: int) -> None:
-        """Set the target using the 2IHJ closed-percentage coordinate."""
+        """Set the 2IHJ target opening percentage directly."""
 
         self._check_range(position, 0, 100, "position")
         await self.async_set_service(
             SERVICE_OPENER,
-            {"target": 100 - position},
+            {"target": position},
         )
 
     async def async_set_service(
@@ -289,12 +289,6 @@ class HuaweiDevice(HuaweiDeviceStateMixin):
             except ValueError:
                 return None
         return None
-
-    @staticmethod
-    def _ha_position(value: int) -> int:
-        """Convert 2IHJ closed percentage to HA open percentage."""
-
-        return 100 - min(max(value, 0), 100)
 
     def _notify_state_changed(self) -> None:
         for listener in tuple(self._listeners):
