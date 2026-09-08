@@ -25,7 +25,10 @@ async def async_setup_entry(
     async_add_entities(
         HuaweiSmartHomeFan(device)
         for device in client.hwiot_devices.values()
-        if getattr(device, "ha_platform", None) == "fan"
+        if (
+            getattr(device, "ha_platform", None) == "fan"
+            or "fan" in getattr(device, "ha_platforms", ())
+        )
     )
 
 
@@ -62,7 +65,7 @@ class HuaweiSmartHomeFan(FanEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return self._device.is_on
+        return getattr(self._device, "fan_is_on", self._device.is_on)
 
     @property
     def percentage(self) -> int | None:
@@ -86,7 +89,11 @@ class HuaweiSmartHomeFan(FanEntity):
         percentage = kwargs.pop("percentage", None)
         preset_mode = kwargs.pop("preset_mode", None)
         del kwargs
-        await self._device.async_turn_on()
+        fan_turn_on = getattr(self._device, "async_fan_turn_on", None)
+        if fan_turn_on is None:
+            await self._device.async_turn_on()
+        else:
+            await fan_turn_on()
         if preset_mode is not None:
             await self._device.async_set_preset_mode(preset_mode)
         if percentage is not None:
@@ -94,7 +101,11 @@ class HuaweiSmartHomeFan(FanEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         del kwargs
-        await self._device.async_turn_off()
+        fan_turn_off = getattr(self._device, "async_fan_turn_off", None)
+        if fan_turn_off is None:
+            await self._device.async_turn_off()
+        else:
+            await fan_turn_off()
 
     async def async_set_percentage(self, percentage: int) -> None:
         await self._device.async_set_percentage(percentage)
