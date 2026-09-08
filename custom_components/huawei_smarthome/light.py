@@ -30,7 +30,10 @@ async def async_setup_entry(
     client = entry.runtime_data
     entities = []
     for device in client.hwiot_devices.values():
-        if getattr(device, "ha_platform", None) != "light":
+        if (
+            getattr(device, "ha_platform", None) != "light"
+            and "light" not in getattr(device, "ha_platforms", ())
+        ):
             continue
         light_keys = getattr(device, "light_keys", ())
         if light_keys:
