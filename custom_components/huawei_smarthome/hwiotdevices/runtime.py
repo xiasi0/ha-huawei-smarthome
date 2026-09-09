@@ -63,12 +63,25 @@ _SENSOR_RULES = {
     "battery_level": ({"battery"}, {"level", "voltage", "battery"}),
     "co2": ({"co2"}, {"co2", "concentration", "current"}),
     "electric_current": (
-        {"current", "electricity"},
-        {"current", "electricCurrent"},
+        {"current", "electric", "electricity"},
+        ("current", "electricCurrent"),
     ),
     "energy_consumption": (
-        {"energy", "electricity", "powerelectricity"},
-        {"energy", "electricity", "TotalElectricity", "totalElectricity"},
+        {
+            "consumption",
+            "electric",
+            "electricity",
+            "energy",
+            "powerelectricity",
+        },
+        (
+            "totalElectricity",
+            "TotalElectricity",
+            "totalConsum",
+            "consumption",
+            "electricity",
+            "energy",
+        ),
     ),
     "formaldehyde": (
         {"formaldehyde", "hcho"},
@@ -89,8 +102,24 @@ _SENSOR_RULES = {
         {"temperature"},
         {"current", "currentFloat", "temperature"},
     ),
-    "voltage": ({"voltage"}, {"current", "voltage"}),
+    "voltage": (
+        {"electric", "electricity", "voltage"},
+        ("voltage", "current"),
+    ),
     "tds": ({"water"}, {"tds"}),
+}
+_SENSOR_FIELD_PRIORITIES = {
+    "electric_current": {"electricCurrent": 20, "current": 10},
+    "energy_consumption": {
+        "totalElectricity": 50,
+        "TotalElectricity": 50,
+        "totalConsum": 40,
+        "consumption": 30,
+        "electricity": 20,
+        "energy": 10,
+    },
+    "power": {"power": 20, "current": 10},
+    "voltage": {"voltage": 20, "current": 10},
 }
 _BINARY_SERVICE_TYPES = frozenset(
     {
@@ -207,6 +236,7 @@ class HuaweiDeviceRuntime:
         self._cover_service: CoverService | None = None
         self._humidifier_service: HumidifierService | None = None
         self._sensor_bindings: dict[str, tuple[str, str]] = {}
+        self._sensor_binding_priorities: dict[str, int] = {}
         self._binary_bindings: dict[str, tuple[str, str]] = {}
         self._binary_semantics: dict[str, str] = {}
         self._number_bindings: dict[str, tuple[str, str]] = {}
@@ -604,12 +634,12 @@ class HuaweiDeviceRuntime:
         return frozenset(keys)
 
     @property
-    def sensor_units(self) -> Mapping[str, str]:
-        units: dict[str, str] = {}
+    def sensor_units(self) -> Mapping[str, str | None]:
+        units: dict[str, str | None] = {}
         for key, (sid, field_name) in self._sensor_bindings.items():
             spec = self.profile.services.get(sid)
             field = spec.field(field_name) if spec is not None else None
-            if field is not None and field.unit:
+            if field is not None:
                 units[key] = field.unit
         return units
 
@@ -1167,6 +1197,7 @@ class HuaweiDeviceRuntime:
 
     def _build_generic_bindings(self) -> None:
         self._sensor_bindings = {}
+        self._sensor_binding_priorities = {}
         self._binary_bindings = {}
         self._binary_semantics = {}
         self._number_bindings = {}
@@ -1232,8 +1263,11 @@ class HuaweiDeviceRuntime:
                     (item for item in candidates if item in fields),
                     None,
                 )
-                if field is not None and key not in self._sensor_bindings:
-                    self._sensor_bindings[key] = (sid, field)
+                if field is not None:
+                    priority = _SENSOR_FIELD_PRIORITIES.get(key, {}).get(field, 0)
+                    if priority > self._sensor_binding_priorities.get(key, -1):
+                        self._sensor_bindings[key] = (sid, field)
+                        self._sensor_binding_priorities[key] = priority
             if service_type in _BINARY_SERVICE_TYPES or (
                 service_type == "alarm" and alarm_sensor_key is not None
             ):

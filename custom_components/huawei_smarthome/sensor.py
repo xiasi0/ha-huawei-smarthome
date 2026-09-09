@@ -12,12 +12,8 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
-    UnitOfElectricCurrent,
-    UnitOfElectricPotential,
-    UnitOfEnergy,
     UnitOfTemperature,
     LIGHT_LUX,
-    UnitOfPower,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
@@ -28,8 +24,8 @@ from .device_registry import device_identifier, profile_configuration_url
 _SENSOR_METADATA = {
     "energy_consumption": (
         "Energy consumption",
-        SensorDeviceClass.ENERGY,
-        UnitOfEnergy.KILO_WATT_HOUR,
+        None,
+        None,
         SensorStateClass.TOTAL_INCREASING,
         1.0,
     ),
@@ -77,22 +73,22 @@ _SENSOR_METADATA = {
     ),
     "power": (
         "Current power",
-        SensorDeviceClass.POWER,
-        UnitOfPower.WATT,
+        None,
+        None,
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
     "electric_current": (
         "Current",
-        SensorDeviceClass.CURRENT,
-        UnitOfElectricCurrent.AMPERE,
+        None,
+        None,
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
     "voltage": (
         "Voltage",
-        SensorDeviceClass.VOLTAGE,
-        UnitOfElectricPotential.VOLT,
+        None,
+        None,
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
@@ -125,21 +121,29 @@ _SENSOR_METADATA = {
         1.0,
     ),
 }
+_PROFILE_UNIT_DEVICE_CLASSES = {
+    "electric_current": SensorDeviceClass.CURRENT,
+    "energy_consumption": SensorDeviceClass.ENERGY,
+    "power": SensorDeviceClass.POWER,
+    "voltage": SensorDeviceClass.VOLTAGE,
+}
 
 
 def _with_profile_metadata(
     metadata: tuple[Any, ...],
     unit: str | None,
     name: str | None,
+    key: str,
 ) -> tuple[Any, ...]:
     """Prefer explicit Profile labels and units over semantic fallbacks."""
 
-    if not unit and not name:
+    profile_device_class = _PROFILE_UNIT_DEVICE_CLASSES.get(key)
+    if not unit and not name and profile_device_class is None:
         return metadata
     return (
         name or metadata[0],
-        metadata[1],
-        unit or metadata[2],
+        profile_device_class if profile_device_class is not None and unit else metadata[1],
+        unit if profile_device_class is not None else unit or metadata[2],
         metadata[3],
         metadata[4],
     )
@@ -163,6 +167,7 @@ async def async_setup_entry(
                     metadata,
                     device.sensor_units.get(key),
                     device.sensor_names.get(key),
+                    key,
                 )
                 entities.append(HuaweiSmartHomeSensor(device, key, metadata))
     async_add_entities(entities)
