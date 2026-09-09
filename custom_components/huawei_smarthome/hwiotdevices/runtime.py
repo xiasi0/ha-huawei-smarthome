@@ -74,6 +74,10 @@ _SENSOR_RULES = {
         {"formaldehyde"},
         {"current", "currentFloat", "concentration"},
     ),
+    "gas_concentration": (
+        {"equipmentstatus", "gas"},
+        {"ConcentrationValue", "current", "concentration", "gas"},
+    ),
     "humidity": (
         {"humidity"},
         {"current", "currentFloat", "humidity", "relativeHumidity"},
@@ -92,6 +96,7 @@ _BINARY_SERVICE_TYPES = frozenset(
     {
         "battery",
         "doorcontact",
+        "gas",
         "motionsensor",
         "pir",
         "smoke",
@@ -104,6 +109,7 @@ _BINARY_FIELDS = {
     "door": {"status", "state", "door"},
     "motion": {"status", "state", "motion", "presence", "alarm"},
     "presence": {"status", "state", "presence", "motion", "alarm"},
+    "gas": {"status", "state", "gas", "level", "alarm"},
     "smoke": {"status", "state", "smoke", "level"},
     "water_leak": {"status", "state", "waterLeak"},
 }
@@ -131,6 +137,39 @@ def _smoke_level_is_on(value: Any) -> bool | None:
     if level == 2:
         return True
     if level == 1:
+        return False
+    return None
+
+
+def _gas_level_is_on(value: Any) -> bool | None:
+    """Convert the verified LEL level ranges into an alarm state."""
+
+    level = _int_value(value)
+    if level is None:
+        return None
+    if level >= 9:
+        return True
+    if level <= 8:
+        return False
+    return None
+
+
+def _gas_alarm_is_on(value: Any, field: Any) -> bool | None:
+    """Convert a gas alarm enum using the values declared by its Profile."""
+
+    level = _int_value(value)
+    if level is None or field is None:
+        return None
+    enum_values = {raw for raw, _ in field.enum_values}
+    if {"2", "3"} & enum_values:
+        if level in {2, 3}:
+            return True
+        if level in {0, 1}:
+            return False
+        return None
+    if level == 1:
+        return True
+    if level == 0:
         return False
     return None
 
@@ -607,6 +646,7 @@ class HuaweiDeviceRuntime:
             "door": "Door",
             "motion": "Motion",
             "presence": "Presence",
+            "gas": "Gas",
             "smoke": "Smoke",
             "water_leak": "Water leak",
         }
@@ -634,6 +674,7 @@ class HuaweiDeviceRuntime:
             "door": "door",
             "motion": "motion",
             "presence": "occupancy",
+            "gas": "gas",
             "smoke": "smoke",
             "water_leak": "moisture",
         }
@@ -662,6 +703,12 @@ class HuaweiDeviceRuntime:
         value = self.value(sid, field)
         if self._binary_semantics.get(key) == "smoke_level":
             return _smoke_level_is_on(value)
+        if self._binary_semantics.get(key) == "gas_level":
+            return _gas_level_is_on(value)
+        if self._binary_semantics.get(key) == "gas_alarm":
+            spec = self.profile.services.get(sid)
+            profile_field = spec.field(field) if spec is not None else None
+            return _gas_alarm_is_on(value, profile_field)
         if isinstance(value, str):
             return value.strip().lower() in {
                 "1", "true", "on", "open", "detected"
@@ -1143,6 +1190,7 @@ class HuaweiDeviceRuntime:
         }
         number_kinds = {
             "airpurifying",
+            "alarmthreshold",
             "electricity",
             "fan",
             "gear",
@@ -1151,6 +1199,25 @@ class HuaweiDeviceRuntime:
             "water",
             "wind",
         }
+        has_smoke_service = any(
+            candidate_sid in self._cloud_service_ids
+            and candidate_spec.kind == "smoke"
+            for candidate_sid, candidate_spec in self.profile.services.items()
+        )
+        has_gas_service = any(
+            candidate_sid in self._cloud_service_ids
+            and (
+                candidate_spec.kind == "gas"
+                or (
+                    candidate_spec.kind == "equipmentstatus"
+                    and candidate_spec.field("ConcentrationValue") is not None
+                )
+            )
+            for candidate_sid, candidate_spec in self.profile.services.items()
+        )
+        alarm_sensor_key = (
+            "smoke" if has_smoke_service else "gas" if has_gas_service else None
+        )
         for sid, spec in self.profile.services.items():
             if sid not in self._cloud_service_ids:
                 continue
@@ -1167,23 +1234,21 @@ class HuaweiDeviceRuntime:
                 )
                 if field is not None and key not in self._sensor_bindings:
                     self._sensor_bindings[key] = (sid, field)
-            has_smoke_service = any(
-                candidate_sid in self._cloud_service_ids
-                and candidate_spec.kind == "smoke"
-                for candidate_sid, candidate_spec in self.profile.services.items()
-            )
             if service_type in _BINARY_SERVICE_TYPES or (
-                service_type == "alarm" and has_smoke_service
+                service_type == "alarm" and alarm_sensor_key is not None
             ):
-                binary_fields = (
-                    {"presence": _BINARY_FIELDS["presence"]}
-                    if service_type == "pir"
-                    else {"motion": _BINARY_FIELDS["motion"]}
-                    if service_type == "motionsensor"
-                    else {"smoke": {"alarm"}}
-                    if service_type == "alarm" and has_smoke_service
-                    else _BINARY_FIELDS
-                )
+                if service_type == "pir":
+                    binary_fields = {"presence": _BINARY_FIELDS["presence"]}
+                elif service_type == "motionsensor":
+                    binary_fields = {"motion": _BINARY_FIELDS["motion"]}
+                elif service_type == "gas":
+                    binary_fields = {"gas": _BINARY_FIELDS["gas"]}
+                elif service_type == "smoke":
+                    binary_fields = {"smoke": _BINARY_FIELDS["smoke"]}
+                elif service_type == "alarm" and alarm_sensor_key is not None:
+                    binary_fields = {alarm_sensor_key: {"alarm"}}
+                else:
+                    binary_fields = _BINARY_FIELDS
                 for key, candidates in binary_fields.items():
                     field = next(
                         (item for item in candidates if item in fields),
@@ -1196,6 +1261,12 @@ class HuaweiDeviceRuntime:
                         self._binary_semantics[key] = (
                             "smoke_level"
                             if service_type == "smoke" and field == "level"
+                            else "gas_level"
+                            if service_type == "gas" and field == "level"
+                            else "gas_alarm"
+                            if service_type == "alarm"
+                            and key == "gas"
+                            and field == "alarm"
                             else "boolean"
                         )
 

@@ -54,6 +54,13 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
+    "gas_concentration": (
+        "Gas concentration",
+        None,
+        None,
+        SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
     "temperature": (
         "Temperature",
         SensorDeviceClass.TEMPERATURE,
