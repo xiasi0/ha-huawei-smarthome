@@ -26,23 +26,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .device_registry import device_identifier, profile_configuration_url
 
 _SENSOR_METADATA = {
-    # The 124U H5 profile calls power/current "当前功率" and renders W.
-    "current": (
-        "Power",
-        SensorDeviceClass.POWER,
-        UnitOfPower.WATT,
-        SensorStateClass.MEASUREMENT,
-        1.0,
-    ),
-    # H5 daily statistics are displayed in kWh and divide the raw Wh value
-    # by 1000 before rendering it.
-    "consumption": (
-        "Energy consumption",
-        SensorDeviceClass.ENERGY,
-        UnitOfEnergy.KILO_WATT_HOUR,
-        SensorStateClass.TOTAL_INCREASING,
-        0.001,
-    ),
     "energy_consumption": (
         "Energy consumption",
         SensorDeviceClass.ENERGY,
@@ -60,13 +43,6 @@ _SENSOR_METADATA = {
     "co2": (
         "Carbon dioxide",
         SensorDeviceClass.CO2,
-        "ppm",
-        SensorStateClass.MEASUREMENT,
-        1.0,
-    ),
-    "gas_concentration": (
-        "Gas concentration",
-        None,
         "ppm",
         SensorStateClass.MEASUREMENT,
         1.0,
@@ -92,20 +68,6 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
-    "filter_remaining": (
-        "Filter remaining",
-        None,
-        PERCENTAGE,
-        SensorStateClass.MEASUREMENT,
-        1.0,
-    ),
-    "filter_remaining_time": (
-        "Filter remaining time",
-        None,
-        "h",
-        SensorStateClass.MEASUREMENT,
-        1.0,
-    ),
     "power": (
         "Current power",
         SensorDeviceClass.POWER,
@@ -127,25 +89,11 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
-    "total_electricity": (
-        "Total electricity",
-        SensorDeviceClass.ENERGY,
-        UnitOfEnergy.KILO_WATT_HOUR,
-        SensorStateClass.TOTAL_INCREASING,
-        1.0,
-    ),
     "battery_level": (
         "Battery",
         SensorDeviceClass.BATTERY,
         PERCENTAGE,
         SensorStateClass.MEASUREMENT,
-        1.0,
-    ),
-    "rotation_mode": (
-        "Rotation mode",
-        None,
-        None,
-        None,
         1.0,
     ),
     "speaker_state": (
@@ -162,14 +110,32 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
-    "light_level": (
-        "Light level",
+    "tds": (
+        "Total dissolved solids",
         None,
-        None,
-        None,
+        "ppm",
+        SensorStateClass.MEASUREMENT,
         1.0,
     ),
 }
+
+
+def _with_profile_metadata(
+    metadata: tuple[Any, ...],
+    unit: str | None,
+    name: str | None,
+) -> tuple[Any, ...]:
+    """Prefer explicit Profile labels and units over semantic fallbacks."""
+
+    if not unit and not name:
+        return metadata
+    return (
+        name or metadata[0],
+        metadata[1],
+        unit or metadata[2],
+        metadata[3],
+        metadata[4],
+    )
 
 
 async def async_setup_entry(
@@ -183,13 +149,14 @@ async def async_setup_entry(
     client = entry.runtime_data
     entities = []
     for device in client.hwiot_devices.values():
-        for key in getattr(device, "energy_sensor_keys", ()):
+        for key in device.sensor_keys:
             metadata = _SENSOR_METADATA.get(key)
             if metadata is not None:
-                entities.append(HuaweiSmartHomeSensor(device, key, metadata))
-        for key in getattr(device, "sensor_keys", ()):
-            metadata = _SENSOR_METADATA.get(key)
-            if metadata is not None:
+                metadata = _with_profile_metadata(
+                    metadata,
+                    device.sensor_units.get(key),
+                    device.sensor_names.get(key),
+                )
                 entities.append(HuaweiSmartHomeSensor(device, key, metadata))
     async_add_entities(entities)
 
@@ -228,7 +195,7 @@ class HuaweiSmartHomeSensor(SensorEntity):
 
     @property
     def native_value(self) -> str | int | float | None:
-        value = getattr(self._device, self._key)
+        value = self._device.sensor_value(self._key)
         if value is None or self._value_scale == 1.0:
             return value
         return value * self._value_scale

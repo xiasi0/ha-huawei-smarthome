@@ -110,9 +110,7 @@ class HuaweiMqttClient:
         """Set the application message callback."""
 
         self._on_message = handler
-        set_handler = getattr(self._transport, "set_message_handler", None)
-        if callable(set_handler):
-            set_handler(handler)
+        self._transport.set_message_handler(handler)
 
     async def async_publish(
         self,

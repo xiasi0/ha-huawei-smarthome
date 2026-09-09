@@ -1,1 +1,1 @@
-"""Huawei SmartHome product device implementations."""
+"""Huawei SmartHome Profile-backed device runtime."""
