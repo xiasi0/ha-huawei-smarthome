@@ -98,7 +98,10 @@ _SENSOR_RULES = {
         {"humidity"},
         {"current", "currentFloat", "humidity", "relativeHumidity"},
     ),
-    "illuminance": ({"illuminance"}, {"current", "illuminance", "lux"}),
+    "illuminance": (
+        {"illuminance", "luminance"},
+        {"current", "illuminance", "lux"},
+    ),
     "pm2p5": ({"pm2p5"}, {"current", "currentFloat", "pm2p5", "pm2p5Value"}),
     "power": ({"power", "electricity", "powerelectricity"}, {"current", "power"}),
     "temperature": (
@@ -109,6 +112,7 @@ _SENSOR_RULES = {
         {"electric", "electricity", "voltage"},
         ("voltage", "current"),
     ),
+    "distance": ({"targetdistance", "distance"}, {"distance", "current"}),
     "tds": ({"water"}, {"tds"}),
 }
 _SENSOR_FIELD_PRIORITIES = {
@@ -129,12 +133,15 @@ _SENSOR_FIELD_PRIORITIES = {
     },
     "power": {"power": 20, "current": 10},
     "voltage": {"voltage": 20, "current": 10},
+    "distance": {"distance": 20, "current": 10},
 }
 _BINARY_SERVICE_TYPES = frozenset(
     {
         "battery",
         "doorcontact",
         "doorsensor",
+        "basicfenceevent",
+        "fault",
         "gas",
         "motionsensor",
         "pir",
@@ -148,6 +155,7 @@ _BINARY_FIELDS = {
     "door": {"status", "state", "door"},
     "motion": {"status", "state", "motion", "presence", "alarm"},
     "presence": {"status", "state", "presence", "motion", "alarm"},
+    "problem": {"status"},
     "gas": {"status", "state", "gas", "level", "alarm"},
     "smoke": {"status", "state", "smoke", "level"},
     "water_leak": {"status", "state", "waterLeak"},
@@ -705,6 +713,7 @@ class HuaweiDeviceRuntime:
             "door": "Door",
             "motion": "Motion",
             "presence": "Presence",
+            "problem": "Problem",
             "gas": "Gas",
             "smoke": "Smoke",
             "water_leak": "Water leak",
@@ -733,6 +742,7 @@ class HuaweiDeviceRuntime:
             "door": "door",
             "motion": "motion",
             "presence": "occupancy",
+            "problem": "problem",
             "gas": "gas",
             "smoke": "smoke",
             "water_leak": "moisture",
@@ -1247,6 +1257,7 @@ class HuaweiDeviceRuntime:
             "gear",
             "lightmode",
             "mode",
+            "modesetting",
         }
         number_kinds = {
             "airpurifying",
@@ -1258,6 +1269,9 @@ class HuaweiDeviceRuntime:
             "temperature",
             "water",
             "wind",
+            "luminance",
+            "modesetting",
+            "time",
         }
         has_smoke_service = any(
             candidate_sid in self._cloud_service_ids
@@ -1285,6 +1299,8 @@ class HuaweiDeviceRuntime:
                 continue
             service_type = spec.kind
             fields = set(spec.fields)
+            if sid.casefold() == "pir" and "status" in fields:
+                service_type = "pir"
             for key, (service_kinds, candidates) in _SENSOR_RULES.items():
                 if service_type not in service_kinds:
                     continue
@@ -1302,6 +1318,10 @@ class HuaweiDeviceRuntime:
             ):
                 if service_type == "pir":
                     binary_fields = {"presence": _BINARY_FIELDS["presence"]}
+                elif service_type == "basicfenceevent":
+                    binary_fields = {"presence": {"existent"}}
+                elif service_type == "fault":
+                    binary_fields = {"problem": _BINARY_FIELDS["problem"]}
                 elif service_type == "motionsensor":
                     binary_fields = {"motion": _BINARY_FIELDS["motion"]}
                 elif service_type in {"doorcontact", "doorsensor"}:

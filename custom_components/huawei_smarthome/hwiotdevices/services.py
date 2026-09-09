@@ -128,7 +128,14 @@ class HuaweiService:
 class SwitchService(HuaweiService):
     """Basic on/off service."""
 
-    field_name = "on"
+    def __init__(
+        self,
+        device: "HuaweiDeviceRuntime",
+        spec: ProfileService,
+        field_name: str = "on",
+    ) -> None:
+        super().__init__(device, spec)
+        self.field_name = field_name
 
     @property
     def is_on(self) -> bool | None:
@@ -689,9 +696,26 @@ def create_basic_service(
     """Create a basic service only when its Profile mapping is unambiguous."""
 
     service_type = spec.kind
-    if service_type == "switch" or _is_switch_sid(spec.sid):
-        field = spec.field("on")
-        return SwitchService(device, spec) if field and field.writable else None
+    if service_type in {"switch", "backlight"} or _is_switch_sid(spec.sid):
+        field_name = "on"
+        field = spec.field(field_name)
+        if field is None:
+            field = next(
+                (
+                    candidate
+                    for candidate in spec.fields.values()
+                    if candidate.writable
+                    and (candidate.data_type or "").strip().lower()
+                    in {"bool", "boolean"}
+                ),
+                None,
+            )
+            field_name = field.name if field is not None else field_name
+        return (
+            SwitchService(device, spec, field_name)
+            if field and field.writable
+            else None
+        )
     if service_type == "brightness" or spec.sid == "brightness":
         field = spec.field("brightness")
         return (

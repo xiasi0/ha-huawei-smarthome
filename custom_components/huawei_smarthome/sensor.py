@@ -92,6 +92,13 @@ _SENSOR_METADATA = {
         SensorStateClass.MEASUREMENT,
         1.0,
     ),
+    "distance": (
+        "Distance",
+        None,
+        None,
+        SensorStateClass.MEASUREMENT,
+        1.0,
+    ),
     "battery_level": (
         "Battery",
         SensorDeviceClass.BATTERY,
@@ -126,6 +133,7 @@ _PROFILE_UNIT_DEVICE_CLASSES = {
     "energy_consumption": SensorDeviceClass.ENERGY,
     "power": SensorDeviceClass.POWER,
     "voltage": SensorDeviceClass.VOLTAGE,
+    "distance": SensorDeviceClass.DISTANCE,
 }
 
 
