@@ -11,7 +11,7 @@ from ..mqtt.commands import HuaweiCommandGateway
 from ..mqtt.protocol import decode_message
 from ..mqtt_client import HuaweiMqttClient
 from .extensions import RgbCctExtension, SpeakerExtension, create_extensions
-from .profile import ProductProfile
+from .profile import ProfileField, ProductProfile
 from .services import (
     BrightnessService,
     ColorTemperatureService,
@@ -60,7 +60,10 @@ _EVENT_SERVICE_RULES = {
 }
 
 _SENSOR_RULES = {
-    "battery_level": ({"battery"}, {"level", "voltage", "battery"}),
+    "battery_level": (
+        {"battery"},
+        ("level", "capacity", "battery", "voltage"),
+    ),
     "co2": ({"co2"}, {"co2", "concentration", "current"}),
     "electric_current": (
         {"current", "electric", "electricity"},
@@ -109,6 +112,12 @@ _SENSOR_RULES = {
     "tds": ({"water"}, {"tds"}),
 }
 _SENSOR_FIELD_PRIORITIES = {
+    "battery_level": {
+        "level": 40,
+        "capacity": 30,
+        "battery": 20,
+        "voltage": 10,
+    },
     "electric_current": {"electricCurrent": 20, "current": 10},
     "energy_consumption": {
         "totalElectricity": 50,
@@ -125,6 +134,7 @@ _BINARY_SERVICE_TYPES = frozenset(
     {
         "battery",
         "doorcontact",
+        "doorsensor",
         "gas",
         "motionsensor",
         "pir",
@@ -134,7 +144,7 @@ _BINARY_SERVICE_TYPES = frozenset(
 )
 _BINARY_FIELDS = {
     "charging": {"charge", "charging"},
-    "battery_low": {"lowBattery", "emergentBattery", "alarm"},
+    "battery_low": {"lowBattery", "emergentBattery"},
     "door": {"status", "state", "door"},
     "motion": {"status", "state", "motion", "presence", "alarm"},
     "presence": {"status", "state", "presence", "motion", "alarm"},
@@ -157,6 +167,25 @@ def _int_value(value: Any) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def _is_low_battery_field(field: ProfileField) -> bool:
+    """Return whether a Profile field explicitly describes low battery."""
+
+    text = " ".join(
+        value
+        for value in (
+            field.name,
+            field.label,
+            field.description,
+            *(description for _raw, description in field.enum_values),
+        )
+        if value
+    ).casefold()
+    return any(
+        token in text
+        for token in ("low battery", "lowbattery", "battery low", "低电", "电量低")
+    )
 
 
 def _smoke_level_is_on(value: Any) -> bool | None:
@@ -1275,12 +1304,18 @@ class HuaweiDeviceRuntime:
                     binary_fields = {"presence": _BINARY_FIELDS["presence"]}
                 elif service_type == "motionsensor":
                     binary_fields = {"motion": _BINARY_FIELDS["motion"]}
+                elif service_type in {"doorcontact", "doorsensor"}:
+                    binary_fields = {"door": _BINARY_FIELDS["door"]}
                 elif service_type == "gas":
                     binary_fields = {"gas": _BINARY_FIELDS["gas"]}
                 elif service_type == "smoke":
                     binary_fields = {"smoke": _BINARY_FIELDS["smoke"]}
                 elif service_type == "battery":
-                    binary_fields = {"battery_low": _BINARY_FIELDS["battery_low"]}
+                    battery_fields = set(_BINARY_FIELDS["battery_low"])
+                    alarm_field = spec.field("alarm")
+                    if alarm_field is not None and _is_low_battery_field(alarm_field):
+                        battery_fields.add("alarm")
+                    binary_fields = {"battery_low": battery_fields}
                 elif service_type == "alarm" and alarm_sensor_key is not None:
                     binary_fields = {alarm_sensor_key: {"alarm"}}
                 else:
