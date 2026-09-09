@@ -40,7 +40,7 @@ async def async_setup_entry(
     from .device_registry import register_devices
     from .errors import ReauthenticationRequired
     from .storage.credentials import HomeAssistantCredentialStore
-    from .storage.profile_metadata import HomeAssistantProductMetadataStore
+    from .storage.profile_metadata import HomeAssistantProductProfileStore
     from .storage.state import HomeAssistantAccountStateStore
 
     session = async_get_clientsession(hass)
@@ -64,7 +64,7 @@ async def async_setup_entry(
         credential_store=HomeAssistantCredentialStore(hass),
         state_store=HomeAssistantAccountStateStore(hass, entry.entry_id),
         api=smart_home_api,
-        metadata_store=HomeAssistantProductMetadataStore(hass),
+        profile_store=HomeAssistantProductProfileStore(hass, session),
     )
     account = entry.data.get(CONF_ACCOUNT)
     if isinstance(account, str) and account.strip() and entry.title != account.strip():
@@ -141,19 +141,15 @@ async def async_remove_config_entry_device(
     )
     if len(identifiers) != 1:
         return False
-    config_entries = getattr(device_entry, "config_entries", ())
+    config_entries = device_entry.config_entries
     if config_entries and config_entry.entry_id not in config_entries:
         return False
     if len(config_entries) > 1:
         return False
 
-    from .storage.credentials import HomeAssistantCredentialStore
     from homeassistant.helpers import device_registry
 
-    await HomeAssistantCredentialStore(hass).async_add_device_exclusion(
-        account,
-        identifiers[0],
-    )
+    await config_entry.runtime_data.async_exclude_device(identifiers[0])
     device_registry.async_get(hass).async_remove_device(device_entry.id)
     return True
 

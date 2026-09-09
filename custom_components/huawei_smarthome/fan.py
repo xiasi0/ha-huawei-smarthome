@@ -25,10 +25,7 @@ async def async_setup_entry(
     async_add_entities(
         HuaweiSmartHomeFan(device)
         for device in client.hwiot_devices.values()
-        if (
-            getattr(device, "ha_platform", None) == "fan"
-            or "fan" in getattr(device, "ha_platforms", ())
-        )
+        if "fan" in device.ha_platforms
     )
 
 
@@ -38,13 +35,23 @@ class HuaweiSmartHomeFan(FanEntity):
     def __init__(self, device: Any) -> None:
         self._device = device
         self._attr_unique_id = f"{device.home_id}_{device.dev_id}_fan"
-        self._attr_name = getattr(device, "fan_entity_name", "Air purifier")
+        self._attr_name = device.product_name
         self._attr_has_entity_name = True
         self._attr_should_poll = False
-        self._attr_supported_features = (
-            FanEntityFeature.SET_SPEED | FanEntityFeature.PRESET_MODE
-        )
-        self._attr_percentage_step = device.percentage_step
+        supported_features = FanEntityFeature(0)
+        if device.fan_supports_turn_on_off:
+            supported_features |= (
+                FanEntityFeature.TURN_ON | FanEntityFeature.TURN_OFF
+            )
+        if device.fan_supports_percentage:
+            supported_features |= FanEntityFeature.SET_SPEED
+            if device.percentage_step is not None:
+                self._attr_percentage_step = device.percentage_step
+        if device.preset_modes:
+            supported_features |= FanEntityFeature.PRESET_MODE
+        if device.fan_supports_oscillation:
+            supported_features |= FanEntityFeature.OSCILLATE
+        self._attr_supported_features = supported_features
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -65,7 +72,7 @@ class HuaweiSmartHomeFan(FanEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return getattr(self._device, "fan_is_on", self._device.is_on)
+        return self._device.fan_is_on
 
     @property
     def percentage(self) -> int | None:
@@ -79,21 +86,24 @@ class HuaweiSmartHomeFan(FanEntity):
     def preset_mode(self) -> str | None:
         return self._device.preset_mode
 
+    @property
+    def oscillating(self) -> bool | None:
+        return self._device.fan_oscillating
+
     async def async_added_to_hass(self) -> None:
         self._device.add_state_listener(self._state_changed)
 
     async def async_will_remove_from_hass(self) -> None:
         self._device.remove_state_listener(self._state_changed)
 
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        percentage = kwargs.pop("percentage", None)
-        preset_mode = kwargs.pop("preset_mode", None)
+    async def async_turn_on(
+        self,
+        percentage: int | None = None,
+        preset_mode: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         del kwargs
-        fan_turn_on = getattr(self._device, "async_fan_turn_on", None)
-        if fan_turn_on is None:
-            await self._device.async_turn_on()
-        else:
-            await fan_turn_on()
+        await self._device.async_fan_turn_on()
         if preset_mode is not None:
             await self._device.async_set_preset_mode(preset_mode)
         if percentage is not None:
@@ -101,17 +111,16 @@ class HuaweiSmartHomeFan(FanEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         del kwargs
-        fan_turn_off = getattr(self._device, "async_fan_turn_off", None)
-        if fan_turn_off is None:
-            await self._device.async_turn_off()
-        else:
-            await fan_turn_off()
+        await self._device.async_fan_turn_off()
 
     async def async_set_percentage(self, percentage: int) -> None:
         await self._device.async_set_percentage(percentage)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         await self._device.async_set_preset_mode(preset_mode)
+
+    async def async_oscillate(self, oscillating: bool) -> None:
+        await self._device.async_set_oscillating(oscillating)
 
     def _state_changed(self) -> None:
         self.async_write_ha_state()

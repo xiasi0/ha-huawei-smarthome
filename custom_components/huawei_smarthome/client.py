@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import logging
 import uuid
-from typing import Any, Protocol
+from typing import Protocol
 
 from .api.client import SmartHomeDiscoveryApi
 from .api.errors import AuthExpiredError
@@ -31,10 +31,12 @@ from .domain.models import (
     is_older_remote_timestamp,
 )
 from .errors import ReauthenticationRequired
-from .hwiotdevices.registry import create_hwiot_device
+from .device_registry import device_identifier_value
+from .hwiotdevices.profile import ProductProfile
+from .hwiotdevices.runtime import HuaweiDeviceRuntime
 from .mqtt_client import HuaweiMqttClient
 from .storage.credentials import CredentialBindingError
-from .storage.profile_metadata import ProductMetadataStore
+from .storage.profile_metadata import ProductProfileStore
 from .storage.state import AccountStateStore
 from .sync_coordinator import SmartHomeSyncCoordinator
 
@@ -59,6 +61,13 @@ class CredentialStore(Protocol):
     async def async_get_device_exclusions(self, account: str) -> frozenset[str]:
         """Load devices excluded from the local HA projection."""
 
+    async def async_add_device_exclusion(
+        self,
+        account: str,
+        device_identifier: str,
+    ) -> None:
+        """Persist one device excluded from the local HA projection."""
+
 
 class HuaweiSmartHomeClient:
     """Own one account, its discovered devices and its MQTT lifecycle."""
@@ -72,7 +81,7 @@ class HuaweiSmartHomeClient:
         credential_store: CredentialStore,
         state_store: AccountStateStore,
         api: SmartHomeDiscoveryApi,
-        metadata_store: ProductMetadataStore | None = None,
+        profile_store: ProductProfileStore | None = None,
         mqtt: HuaweiMqttClient | None = None,
         mqtt_enabled: bool = True,
         reconnect_min: float = 5.0,
@@ -87,7 +96,7 @@ class HuaweiSmartHomeClient:
         self.credentials = credential_store
         self.state_store = state_store
         self.api = api
-        self.metadata_store = metadata_store
+        self.profile_store = profile_store
         self.selected_home_ids = selected_home_ids or None
         self.mqtt_enabled = mqtt_enabled
         self.mqtt = mqtt or HuaweiMqttClient(
@@ -102,7 +111,8 @@ class HuaweiSmartHomeClient:
         self._excluded_device_ids: frozenset[str] = frozenset()
         self._reconnect_task: asyncio.Task[None] | None = None
         self._operation_lock = asyncio.Lock()
-        self._hwiot_devices: dict[tuple[str, str], Any] = {}
+        self._hwiot_devices: dict[tuple[str, str], HuaweiDeviceRuntime] = {}
+        self._profiles: dict[str, ProductProfile] = {}
         self._reconnect_min = reconnect_min
         self._reconnect_max = reconnect_max
         self._started = False
@@ -130,7 +140,7 @@ class HuaweiSmartHomeClient:
         return self._excluded_device_ids
 
     @property
-    def hwiot_devices(self) -> Mapping[tuple[str, str], Any]:
+    def hwiot_devices(self) -> Mapping[tuple[str, str], HuaweiDeviceRuntime]:
         """Return instantiated product devices."""
 
         return self._hwiot_devices
@@ -181,6 +191,10 @@ class HuaweiSmartHomeClient:
                     self._reconnect_loop(),
                     name="huawei-smarthome-mqtt-reconnect",
                 )
+            if self.profile_store is not None:
+                # MQTT is already connected before Profile network I/O begins;
+                # wait here so HA entities bind the final runtime model.
+                await self._refresh_profiles_in_background()
         except (ReauthenticationRequired, CredentialBindingError):
             self.state.connection = ConnectionState.REAUTH_REQUIRED
             self.state.last_error = "Huawei SmartHome authentication required"
@@ -197,6 +211,22 @@ class HuaweiSmartHomeClient:
 
         await self._sync.async_request_full_sync("manual")
         return self.state
+
+    async def async_exclude_device(self, device_identifier: str) -> None:
+        """Exclude one device from the local HA projection."""
+
+        await self.credentials.async_add_device_exclusion(
+            self.account,
+            device_identifier,
+        )
+        self._excluded_device_ids = self._excluded_device_ids | {
+            device_identifier,
+        }
+        for key, device in tuple(self._hwiot_devices.items()):
+            if device_identifier_value(device.descriptor) != device_identifier:
+                continue
+            device.close()
+            self._hwiot_devices.pop(key, None)
 
     async def async_stop(self) -> None:
         """Stop MQTT and the account session."""
@@ -362,31 +392,72 @@ class HuaweiSmartHomeClient:
     ) -> RemoteDiscoverySnapshot:
         """Apply cached Product Profile metadata without network I/O."""
 
-        if self.metadata_store is None:
-            return snapshot
-        names = await self.metadata_store.async_get_manufacturer_names(
+        prod_ids = tuple(
             device.prod_id
             for device in snapshot.devices
             if (device.node_type or "").strip().upper() != "GROUP"
+            and isinstance(device.prod_id, str)
+            and device.prod_id.strip()
         )
-        if not names:
+        if self.profile_store is not None:
+            cached_profiles = await self.profile_store.async_get_cached_profiles(
+                prod_ids
+            )
+            self._profiles.update(
+                {
+                    prod_id.strip().lower(): profile
+                    for prod_id, profile in cached_profiles.items()
+                }
+            )
+        if not self._profiles:
             return snapshot
         return replace(
             snapshot,
             devices=tuple(
                 replace(
                     device,
-                    manufacturer=(
-                        names.get(device.prod_id.strip())
+                    model=(
+                        self._profiles[device.prod_id.strip().lower()].model
                         if isinstance(device.prod_id, str)
-                        and device.prod_id.strip()
-                        else None
+                        and device.prod_id.strip().lower() in self._profiles
+                        and self._profiles[device.prod_id.strip().lower()].model
+                        else
+                        device.model
+                    ),
+                    manufacturer=(
+                        self._profiles[device.prod_id.strip().lower()].manufacturer
+                        if isinstance(device.prod_id, str)
+                        and device.prod_id.strip().lower() in self._profiles
+                        and self._profiles[device.prod_id.strip().lower()].manufacturer
+                        else device.manufacturer
                     )
-                    or device.manufacturer,
                 )
                 for device in snapshot.devices
             ),
         )
+
+    async def _refresh_profiles_in_background(self) -> None:
+        """Fetch missing Profiles without blocking MQTT or account startup."""
+
+        if self.profile_store is None:
+            return
+        try:
+            prod_ids = tuple(
+                device.prod_id
+                for device in self.state.devices.values()
+                if isinstance(device.prod_id, str) and device.prod_id.strip()
+            )
+            await self.profile_store.async_get_profiles(prod_ids)
+            if self._started:
+                await self._sync.async_request_full_sync("profile_refresh")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - Profile is optional
+            _LOGGER.debug(
+                "Huawei SmartHome background Profile refresh failed: %s: %s",
+                type(error).__name__,
+                str(error),
+            )
 
     async def _refresh_dynamic_states_with_token_recovery(
         self,
@@ -412,9 +483,6 @@ class HuaweiSmartHomeClient:
     ) -> bool:
         """Fetch and apply the current state for the selected devices."""
 
-        getter = getattr(self.api, "async_get_dynamic_states", None)
-        if not callable(getter):
-            return False
         source = tuple(
             devices if devices is not None else self.state.devices.values()
         )
@@ -423,6 +491,7 @@ class HuaweiSmartHomeClient:
             if (
                 (device.node_type or "").strip().upper() == "GROUP"
                 or not device.dev_id
+                or self._is_excluded_device(device)
             ):
                 continue
             home_id = (
@@ -436,12 +505,13 @@ class HuaweiSmartHomeClient:
         states: list[RemoteDeviceState] = []
         for home_id, device_ids_raw in devices_by_home.items():
             device_ids = tuple(dict.fromkeys(device_ids_raw))
-            if isinstance(self.api, SmartHomeDiscoveryApi):
-                states.extend(
-                    await getter(session, device_ids, home_id=home_id)
+            states.extend(
+                await self.api.async_get_dynamic_states(
+                    session,
+                    device_ids,
+                    home_id=home_id,
                 )
-            else:
-                states.extend(await getter(session, device_ids))
+            )
         state_batch = tuple(states)
         self._apply_dynamic_states(state_batch)
         if persist:
@@ -480,12 +550,10 @@ class HuaweiSmartHomeClient:
             runtime = self._hwiot_devices.get(key)
             if runtime is None:
                 continue
-            apply_snapshot = getattr(runtime, "apply_state_snapshot", None)
-            if callable(apply_snapshot):
-                changed = (
-                    apply_snapshot(state.services, online=state.online)
-                    or changed
-                )
+            changed = (
+                runtime.apply_state_snapshot(state.services, online=state.online)
+                or changed
+            )
             runtime.update_descriptor(merged)
         return changed
 
@@ -645,15 +713,27 @@ class HuaweiSmartHomeClient:
             device.handle_mqtt_message(topic, payload)
 
     def _sync_hwiot_devices(self) -> None:
-        """Keep product device objects aligned with the latest snapshot."""
+        """Keep Profile-backed runtimes aligned with the latest snapshot."""
 
-        current: dict[tuple[str, str], Any] = {}
+        current: dict[tuple[str, str], HuaweiDeviceRuntime] = {}
         for descriptor in self.state.devices.values():
             if (descriptor.node_type or "").strip().upper() == "GROUP":
                 continue
+            if self._is_excluded_device(descriptor):
+                continue
+            profile = (
+                self._profiles.get(descriptor.prod_id.strip().lower())
+                if isinstance(descriptor.prod_id, str)
+                else None
+            )
             existing = self._hwiot_devices.get(descriptor.key)
+            if profile is None:
+                if existing is not None:
+                    existing.close()
+                continue
             if (
                 existing is not None
+                and isinstance(existing, HuaweiDeviceRuntime)
                 and str(existing.prod_id).strip().lower()
                 == str(descriptor.prod_id or "").strip().lower()
             ):
@@ -662,13 +742,20 @@ class HuaweiSmartHomeClient:
                 continue
             if existing is not None:
                 existing.close()
-            device = create_hwiot_device(descriptor, self.mqtt)
-            if device is not None:
-                current[descriptor.key] = device
+            current[descriptor.key] = HuaweiDeviceRuntime(
+                descriptor,
+                self.mqtt,
+                profile,
+            )
         for key, device in self._hwiot_devices.items():
             if key not in current:
                 device.close()
         self._hwiot_devices = current
+
+    def _is_excluded_device(self, descriptor: RemoteDeviceDescriptor) -> bool:
+        """Return whether a remote device is excluded from HA projection."""
+
+        return device_identifier_value(descriptor) in self._excluded_device_ids
 
 
 def _device_home_index(

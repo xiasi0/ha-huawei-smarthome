@@ -24,9 +24,8 @@ async def async_setup_entry(
     client = entry.runtime_data
     entities = []
     for device in client.hwiot_devices.values():
-        metadata_by_key = getattr(device, "number_metadata", {})
-        for key in getattr(device, "number_keys", ()):
-            metadata = metadata_by_key.get(key)
+        for key in device.number_keys:
+            metadata = device.number_metadata.get(key)
             if metadata is None:
                 continue
             entities.append(HuaweiSmartHomeNumber(device, key, metadata))

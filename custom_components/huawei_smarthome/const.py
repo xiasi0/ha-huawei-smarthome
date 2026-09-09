@@ -12,8 +12,6 @@ CONF_SELECTED_HOME_IDS = "selected_home_ids"
 CONF_PASSWORD = "password"
 
 IDENTITY_STORAGE_KEY = "huawei_smarthome/device_identity.json"
-# Legacy aggregate key retained only for one-time storage migration.
-CREDENTIAL_STORAGE_KEY = "huawei_smarthome/credentials.json"
 ACCOUNT_STORAGE_PREFIX = "huawei_smarthome/accounts"
 STATE_STORAGE_PREFIX = "huawei_smarthome"
 

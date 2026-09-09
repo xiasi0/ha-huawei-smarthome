@@ -24,17 +24,15 @@ async def async_setup_entry(
     client = entry.runtime_data
     entities = []
     for device in client.hwiot_devices.values():
-        names = getattr(device, "select_names", {})
-        options_by_key = getattr(device, "select_options", {})
-        for key in getattr(device, "select_keys", ()):
-            options = options_by_key.get(key, ())
+        for key in device.select_keys:
+            options = device.select_options.get(key, ())
             if not options:
                 continue
             entities.append(
                 HuaweiSmartHomeSelect(
                     device,
                     key,
-                    names.get(key, key),
+                    device.select_names.get(key, key),
                     options,
                 )
             )

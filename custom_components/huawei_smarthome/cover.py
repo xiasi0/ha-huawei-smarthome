@@ -1,4 +1,4 @@
-"""Home Assistant cover projection for Huawei curtain motors."""
+"""Home Assistant cover projection for Profile-backed curtain devices."""
 
 from __future__ import annotations
 
@@ -22,37 +22,40 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create cover entities from instantiated product devices."""
+    """Create covers from Profile-backed runtime compositions."""
 
     del hass
     client = entry.runtime_data
     async_add_entities(
         HuaweiSmartHomeCover(device)
         for device in client.hwiot_devices.values()
-        if getattr(device, "ha_platform", None) == "cover"
+        if "cover" in device.ha_platforms
     )
 
 
 class HuaweiSmartHomeCover(CoverEntity):
-    """Project one Huawei curtain motor as a Home Assistant cover."""
+    """Project one Profile-backed curtain or blind as a cover."""
 
     def __init__(self, device: Any) -> None:
         self._device = device
         self._attr_unique_id = f"{device.home_id}_{device.dev_id}_cover"
-        self._attr_name = getattr(device, "cover_entity_name", "Curtain")
+        self._attr_name = device.product_name
         self._attr_has_entity_name = True
         self._attr_should_poll = False
-        self._attr_supported_features = (
-            CoverEntityFeature.OPEN
-            | CoverEntityFeature.CLOSE
-            | CoverEntityFeature.STOP
-            | CoverEntityFeature.SET_POSITION
-        )
+        features = CoverEntityFeature(0)
+        supported = device.cover_supported_features
+        if "open" in supported:
+            features |= CoverEntityFeature.OPEN
+        if "close" in supported:
+            features |= CoverEntityFeature.CLOSE
+        if "stop" in supported:
+            features |= CoverEntityFeature.STOP
+        if "position" in supported:
+            features |= CoverEntityFeature.SET_POSITION
+        self._attr_supported_features = features
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return the shared HA device identity."""
-
         return DeviceInfo(
             identifiers={device_identifier(self._device.descriptor)},
             name=self._device.name,
@@ -68,11 +71,11 @@ class HuaweiSmartHomeCover(CoverEntity):
 
     @property
     def is_closed(self) -> bool | None:
-        return self._device.is_closed
+        return self._device.cover_is_closed
 
     @property
     def current_cover_position(self) -> int | None:
-        return self._device.current_position
+        return self._device.cover_position
 
     async def async_added_to_hass(self) -> None:
         self._device.add_state_listener(self._state_changed)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from ..const import ACCOUNT_STORAGE_PREFIX, CREDENTIAL_STORAGE_KEY
+from ..const import ACCOUNT_STORAGE_PREFIX
 from ..domain.models import AuthSession
 from .identity import account_identity_key
 from .locking import storage_lock
@@ -39,20 +39,12 @@ class HomeAssistantCredentialStore:
         if store is not None:
             self._store = store
             self._stores: dict[str, Any] = {}
-            self._legacy_store = None
-            self._migration_done = True
             return
         from homeassistant.helpers.storage import Store
 
         self._store = None
         self._hass = hass
         self._stores = {}
-        self._legacy_store = Store(
-            hass,
-            CREDENTIAL_STORAGE_VERSION,
-            CREDENTIAL_STORAGE_KEY,
-        )
-        self._migration_done = False
 
     def _store_for_account(self, account: str) -> Any:
         """Return the Store whose filename is bound to one account."""
@@ -78,7 +70,6 @@ class HomeAssistantCredentialStore:
 
         account = account.strip()
         key = account_storage_key(account)
-        await self._ensure_legacy_migrated()
         async with storage_lock(key):
             raw = await self._store_for_account(account).async_load()
             if not isinstance(raw, Mapping):
@@ -103,7 +94,6 @@ class HomeAssistantCredentialStore:
         """Persist one fully validated account session."""
 
         key = account_storage_key(session.account)
-        await self._ensure_legacy_migrated()
         async with storage_lock(key):
             current = await self._store_for_account(session.account).async_load()
             await self._store_for_account(session.account).async_save(
@@ -118,7 +108,6 @@ class HomeAssistantCredentialStore:
 
         account = account.strip()
         key = account_storage_key(account)
-        await self._ensure_legacy_migrated()
         async with storage_lock(key):
             raw = await self._store_for_account(account).async_load()
             return frozenset(_device_exclusions_from_storage(raw))
@@ -135,7 +124,6 @@ class HomeAssistantCredentialStore:
         if not device_identifier:
             raise ValueError("device identifier is required")
         key = account_storage_key(account)
-        await self._ensure_legacy_migrated()
         async with storage_lock(key):
             store = self._store_for_account(account)
             raw = await store.async_load()
@@ -154,55 +142,8 @@ class HomeAssistantCredentialStore:
         """Remove credentials for one account."""
 
         key = account_storage_key(account)
-        await self._ensure_legacy_migrated()
         async with storage_lock(key):
-            store = self._store_for_account(account)
-            remove = getattr(store, "async_remove", None)
-            if callable(remove):
-                await remove()
-            else:
-                await store.async_save(None)
-
-    async def _ensure_legacy_migrated(self) -> None:
-        """Split the old aggregate credential file once, when present."""
-
-        if self._migration_done or self._legacy_store is None:
-            return
-        async with storage_lock(CREDENTIAL_STORAGE_KEY):
-            if self._migration_done:
-                return
-            raw = await self._legacy_store.async_load()
-            accounts = raw.get("accounts") if isinstance(raw, Mapping) else None
-            if not isinstance(accounts, Mapping):
-                self._migration_done = True
-                return
-            records: dict[str, AuthSession] = {}
-            invalid_record = False
-            for value in accounts.values():
-                if not isinstance(value, Mapping):
-                    invalid_record = True
-                    continue
-                session = auth_session_from_storage(value)
-                if session is None:
-                    invalid_record = True
-                    continue
-                try:
-                    account_key = account_storage_key(session.account)
-                except ValueError:
-                    invalid_record = True
-                    continue
-                records.setdefault(account_key, session)
-            for account_key, session in records.items():
-                async with storage_lock(account_key):
-                    store = self._store_for_account(session.account)
-                    if await store.async_load() is None:
-                        await store.async_save(_credential_storage_record(session))
-            if not invalid_record:
-                remove = getattr(self._legacy_store, "async_remove", None)
-                if callable(remove):
-                    await remove()
-            self._migration_done = True
-
+            await self._store_for_account(account).async_remove()
 
 def _credential_storage_record(
     session: AuthSession,

@@ -2,24 +2,35 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Mapping
+import logging
 from typing import Any, Protocol
 
+from ..const import PROFILE_CDN_BASE_URL, PROFILE_CDN_PATH
+from ..hwiotdevices.profile import ProductProfile
 from .locking import storage_lock
 
 
 PROFILE_STORAGE_VERSION = 1
 PROFILE_STORAGE_PREFIX = "huawei_smarthome/profiles"
+_LOGGER = logging.getLogger(__name__)
 
 
-class ProductMetadataStore(Protocol):
-    """Read product metadata without requesting or modeling a Profile."""
+class ProductProfileStore(Protocol):
+    """Load normalized public Profiles keyed by product ID."""
 
-    async def async_get_manufacturer_names(
+    async def async_get_profiles(
         self,
         prod_ids: Iterable[str],
-    ) -> dict[str, str]:
-        """Return cached manufacturer names keyed by product ID."""
+    ) -> dict[str, ProductProfile]:
+        """Return cached or downloaded Profiles."""
+
+    async def async_get_cached_profiles(
+        self,
+        prod_ids: Iterable[str],
+    ) -> dict[str, ProductProfile]:
+        """Return only locally cached Profiles."""
 
 
 def profile_storage_key(prod_id: str) -> str:
@@ -36,15 +47,24 @@ def profile_storage_key(prod_id: str) -> str:
     return f"{PROFILE_STORAGE_PREFIX}/{prod_id}.json"
 
 
-class HomeAssistantProductMetadataStore:
-    """Read manufacturer metadata from one local Store per prodId."""
+class HomeAssistantProductProfileStore:
+    """Persist and fetch one public Profile per product ID."""
 
-    def __init__(self, hass: Any) -> None:
-        from homeassistant.helpers.storage import Store
+    def __init__(
+        self,
+        hass: Any,
+        session: Any,
+        *,
+        store_type: Any | None = None,
+    ) -> None:
+        if store_type is None:
+            from homeassistant.helpers.storage import Store
 
+            store_type = Store
         self._hass = hass
+        self._session = session
+        self._store_type = store_type
         self._stores: dict[str, Any] = {}
-        self._store_type = Store
 
     def _store_for_product(self, prod_id: str) -> Any:
         key = profile_storage_key(prod_id)
@@ -58,42 +78,103 @@ class HomeAssistantProductMetadataStore:
             self._stores[key] = store
         return store
 
-    async def async_get_manufacturer_names(
+    async def async_get_profiles(
         self,
         prod_ids: Iterable[str],
-    ) -> dict[str, str]:
-        """Read each unique product cache once."""
+    ) -> dict[str, ProductProfile]:
+        """Load unique product Profiles with bounded concurrency."""
 
-        names: dict[str, str] = {}
-        for prod_id in sorted(
+        unique = tuple(
+            sorted(
+                {
+                    item.strip()
+                    for item in prod_ids
+                    if isinstance(item, str) and item.strip()
+                }
+            )
+        )
+        cached = await self.async_get_cached_profiles(unique)
+        missing = sorted(
+            set(unique) - set(cached)
+        )
+        semaphore = asyncio.Semaphore(8)
+
+        async def load(prod_id: str) -> tuple[str, ProductProfile] | None:
+            async with semaphore:
+                profile = await self.async_get_profile(prod_id)
+                return (prod_id, profile) if profile is not None else None
+
+        results = await asyncio.gather(*(load(prod_id) for prod_id in missing))
+        downloaded = {
+            prod_id: profile
+            for item in results
+            if item is not None
+            for prod_id, profile in (item,)
+        }
+        return {**cached, **downloaded}
+
+    async def async_get_cached_profiles(
+        self,
+        prod_ids: Iterable[str],
+    ) -> dict[str, ProductProfile]:
+        """Read unique product Profiles without network I/O."""
+
+        unique = sorted(
             {
                 item.strip()
                 for item in prod_ids
                 if isinstance(item, str) and item.strip()
             }
-        ):
+        )
+        profiles: dict[str, ProductProfile] = {}
+        for prod_id in unique:
             storage_key = profile_storage_key(prod_id)
             async with storage_lock(storage_key):
                 raw = await self._store_for_product(prod_id).async_load()
-            manufacturer_name = manufacturer_name_from_storage(raw)
-            if manufacturer_name is not None:
-                names[prod_id] = manufacturer_name
-        return names
+            profile = _profile_from_storage(raw)
+            if profile is not None:
+                profiles[prod_id] = profile
+        return profiles
+
+    async def async_get_profile(self, prod_id: str) -> ProductProfile | None:
+        """Load a Profile from Store, fetching the public CDN on a miss."""
+
+        storage_key = profile_storage_key(prod_id)
+        async with storage_lock(storage_key):
+            store = self._store_for_product(prod_id)
+            cached = await store.async_load()
+            profile = _profile_from_storage(cached)
+            if profile is not None:
+                return profile
+
+            url = (
+                f"{PROFILE_CDN_BASE_URL}"
+                f"{PROFILE_CDN_PATH.format(prod_id=prod_id)}"
+            )
+            try:
+                async with self._session.get(url, timeout=20) as response:
+                    if response.status != 200:
+                        raise RuntimeError(f"HTTP {response.status}")
+                    payload = await response.json(content_type=None)
+                profile = ProductProfile.from_payload(payload)
+            except Exception as error:  # noqa: BLE001 - Profile is optional
+                _LOGGER.debug(
+                    "Huawei SmartHome Profile unavailable: prod_id=%s error=%s",
+                    prod_id,
+                    type(error).__name__,
+                )
+                return None
+            await store.async_save({"profile": payload})
+            return profile
 
 
-def manufacturer_name_from_storage(value: Any) -> str | None:
-    """Extract manufacturer_name from supported local Profile cache shapes."""
-
-    candidates: list[Mapping[str, Any]] = []
-    if isinstance(value, Mapping):
-        candidates.append(value)
-        for key in ("profile", "raw_payload", "json"):
-            child = value.get(key)
-            if isinstance(child, Mapping):
-                candidates.append(child)
-    for candidate in candidates:
-        for key in ("manufacturer_name", "manufacturerName"):
-            name = candidate.get(key)
-            if isinstance(name, str) and name.strip():
-                return name.strip()
-    return None
+def _profile_from_storage(value: Any) -> ProductProfile | None:
+    if not isinstance(value, Mapping):
+        return None
+    payload = value.get("profile")
+    if not isinstance(payload, Mapping) or not payload.get("prodId"):
+        return None
+    try:
+        return ProductProfile.from_payload(payload)
+    except ValueError:
+        return None

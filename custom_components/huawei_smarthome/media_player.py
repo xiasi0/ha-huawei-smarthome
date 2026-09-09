@@ -30,7 +30,7 @@ async def async_setup_entry(
     async_add_entities(
         HuaweiSmartHomeMediaPlayer(device)
         for device in client.hwiot_devices.values()
-        if getattr(device, "ha_platform", None) == "media_player"
+        if "media_player" in device.ha_platforms
     )
 
 
@@ -40,17 +40,22 @@ class HuaweiSmartHomeMediaPlayer(MediaPlayerEntity):
     def __init__(self, device: Any) -> None:
         self._device = device
         self._attr_unique_id = f"{device.home_id}_{device.dev_id}_media_player"
-        self._attr_name = "Speaker"
+        self._attr_name = device.product_name
         self._attr_has_entity_name = True
         self._attr_should_poll = False
-        supported_features = (
-            MediaPlayerEntityFeature.PLAY
-            | MediaPlayerEntityFeature.PAUSE
-            | MediaPlayerEntityFeature.STOP
-            | MediaPlayerEntityFeature.PREVIOUS_TRACK
-            | MediaPlayerEntityFeature.NEXT_TRACK
-        )
-        if getattr(device, "supports_volume_control", True):
+        actions = device.supported_media_actions
+        supported_features = MediaPlayerEntityFeature(0)
+        if "play" in actions:
+            supported_features |= MediaPlayerEntityFeature.PLAY
+        if "pause" in actions:
+            supported_features |= MediaPlayerEntityFeature.PAUSE
+        if "stop" in actions:
+            supported_features |= MediaPlayerEntityFeature.STOP
+        if "previous" in actions:
+            supported_features |= MediaPlayerEntityFeature.PREVIOUS_TRACK
+        if "next" in actions:
+            supported_features |= MediaPlayerEntityFeature.NEXT_TRACK
+        if device.supports_volume_control:
             supported_features |= MediaPlayerEntityFeature.VOLUME_SET
         self._attr_supported_features = supported_features
         self._attr_media_content_type = "music"
@@ -75,18 +80,18 @@ class HuaweiSmartHomeMediaPlayer(MediaPlayerEntity):
     @property
     def state(self) -> MediaPlayerState | None:
         return {
-            0: MediaPlayerState.PAUSED,
-            1: MediaPlayerState.PLAYING,
-            2: MediaPlayerState.IDLE,
-        }.get(self._device.play_state)
+            "paused": MediaPlayerState.PAUSED,
+            "playing": MediaPlayerState.PLAYING,
+            "idle": MediaPlayerState.IDLE,
+        }.get(self._device.media_state)
 
     @property
     def volume_level(self) -> float | None:
-        return getattr(self._device, "volume_level", None)
+        return self._device.volume_level
 
     @property
     def is_volume_muted(self) -> bool | None:
-        return getattr(self._device, "is_volume_muted", None)
+        return self._device.is_volume_muted
 
     @property
     def media_title(self) -> str | None:

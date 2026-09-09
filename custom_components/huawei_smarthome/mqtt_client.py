@@ -110,9 +110,7 @@ class HuaweiMqttClient:
         """Set the application message callback."""
 
         self._on_message = handler
-        set_handler = getattr(self._transport, "set_message_handler", None)
-        if callable(set_handler):
-            set_handler(handler)
+        self._transport.set_message_handler(handler)
 
     async def async_publish(
         self,
@@ -151,9 +149,11 @@ class HuaweiMqttClient:
             raise MqttConnectionError("MQTT command credentials are unavailable")
         if not target or not request_id:
             raise MqttConfigurationError("MQTT command route is incomplete")
+        command_body = dict(body)
+        command_body.pop("requestId", None)
         payload = json.dumps(
             {
-                "body": body,
+                "body": command_body,
                 "header": {
                     "accessToken": settings.password,
                     "ctrlSrc": settings.control_source,
