@@ -651,7 +651,13 @@ class HuaweiDeviceRuntime:
 
     @property
     def colour_mode(self) -> int | None:
-        value = self.value("colourMode", "mode")
+        extension = self.extension(RgbCctExtension)
+        if extension is not None:
+            value = self.value(extension.mode_sid, extension.mode_field_name)
+        else:
+            value = self.value("colourMode", "mode")
+            if value is None:
+                value = self.value("colourMode", "colourMode")
         try:
             return int(value) if value is not None else None
         except (TypeError, ValueError):
@@ -897,8 +903,27 @@ class HuaweiDeviceRuntime:
         field = spec.field(field_name) if spec is not None else None
         if field is None:
             return None
+        extension = self.extension(RgbCctExtension)
         if sid == "lightMode" and field_name == "mode":
-            context = self.value("colourMode", "mode")
+            if extension is not None:
+                requires_context = extension.supports_light_mode_context
+                context = self.value(extension.mode_sid, extension.mode_field_name)
+            else:
+                requires_context = True
+                context = self.value("colourMode", "mode")
+            if requires_context and context is not None:
+                try:
+                    if int(context) != 4:
+                        return None
+                except (TypeError, ValueError):
+                    return None
+        elif (
+            extension is not None
+            and sid == "lightMode"
+            and field_name == extension.light_mode_field_name
+            and extension.supports_light_mode_context
+        ):
+            context = self.value(extension.mode_sid, extension.mode_field_name)
             if context is not None:
                 try:
                     if int(context) != 4:
@@ -926,7 +951,8 @@ class HuaweiDeviceRuntime:
                 if (
                     extension is not None
                     and sid == "lightMode"
-                    and field_name == "mode"
+                    and field_name == extension.light_mode_field_name
+                    and extension.supports_light_mode_context
                 ):
                     await extension.async_set_light_mode(
                         _coerce_profile_value(raw, field)

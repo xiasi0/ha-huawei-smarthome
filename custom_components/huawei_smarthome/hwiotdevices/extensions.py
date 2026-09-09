@@ -27,29 +27,82 @@ class RgbCctExtension:
                 return sid
         raise ValueError("RGB/CCT mode service is unavailable")
 
+    @property
+    def mode_field_name(self) -> str:
+        """Return the Profile field used by the mode service."""
+
+        spec = self.device.profile.services.get(self.mode_sid)
+        if spec is None:
+            return "mode"
+        for name in ("mode", "colourMode"):
+            if spec.field(name) is not None:
+                return name
+        raise ValueError("RGB/CCT mode field is unavailable")
+
+    @property
+    def light_mode_field_name(self) -> str:
+        spec = self.device.profile.services.get("lightMode")
+        if spec is None:
+            return "mode"
+        for name in ("mode", "lightMode"):
+            if spec.field(name) is not None:
+                return name
+        raise ValueError("light-mode field is unavailable")
+
+    @property
+    def supports_light_mode_context(self) -> bool:
+        """Return whether the mode service declares the preset value 4."""
+
+        if "colourMode" not in self.device.cloud_service_ids:
+            return False
+        spec = self.device.profile.services.get("colourMode")
+        field_name = self.mode_field_name
+        field = spec.field(field_name) if spec is not None else None
+        if field is None:
+            return True
+        if not field.enum_values and field.name == "mode":
+            return True
+        return any(raw == "4" for raw, _description in field.enum_values)
+
+    def _mode_value(self, value: int) -> Any:
+        spec = self.device.profile.services.get(self.mode_sid)
+        field = spec.field(self.mode_field_name) if spec is not None else None
+        return _coerce_profile_value(str(value), field) if field is not None else value
+
     async def async_set_rgb(self, value: tuple[int, int, int]) -> None:
         service = self.device.service("colour")
         if service is None:
             raise ValueError("RGB service is unavailable")
-        await self.device.send_service(self.mode_sid, {"mode": 0})
+        await self.device.send_service(
+            self.mode_sid,
+            {self.mode_field_name: self._mode_value(0)},
+        )
         await service.async_set_rgb(value)  # type: ignore[attr-defined]
 
     async def async_set_color_temperature(self, value: int) -> None:
         service = self.device.service("cct")
         if service is None:
             raise ValueError("color temperature service is unavailable")
-        await self.device.send_service(self.mode_sid, {"mode": 1})
+        await self.device.send_service(
+            self.mode_sid,
+            {self.mode_field_name: self._mode_value(1)},
+        )
         await service.async_set_color_temperature(value)  # type: ignore[attr-defined]
 
     async def async_set_light_mode(self, value: int | float | str) -> None:
         """Enter preset-mode context before writing the light preset."""
 
-        if "colourMode" not in self.device.cloud_service_ids:
-            raise ValueError("light-mode context service is unavailable")
         if "lightMode" not in self.device.cloud_service_ids:
             raise ValueError("light-mode service is unavailable")
-        await self.device.send_service("colourMode", {"mode": 4})
-        await self.device.send_service("lightMode", {"mode": value})
+        if self.supports_light_mode_context:
+            await self.device.send_service(
+                "colourMode",
+                {self.mode_field_name: self._mode_value(4)},
+            )
+        await self.device.send_service(
+            "lightMode",
+            {self.light_mode_field_name: value},
+        )
 
 
 class SpeakerExtension:
