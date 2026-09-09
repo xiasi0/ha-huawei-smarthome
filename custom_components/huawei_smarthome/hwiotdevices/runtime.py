@@ -104,7 +104,7 @@ _BINARY_FIELDS = {
     "door": {"status", "state", "door"},
     "motion": {"status", "state", "motion", "presence", "alarm"},
     "presence": {"status", "state", "presence", "motion", "alarm"},
-    "smoke": {"status", "state", "smoke"},
+    "smoke": {"status", "state", "smoke", "level"},
     "water_leak": {"status", "state", "waterLeak"},
 }
 
@@ -121,6 +121,17 @@ def _int_value(value: Any) -> int | None:
             return int(value)
         except ValueError:
             return None
+    return None
+
+
+def _smoke_level_is_on(value: Any) -> bool | None:
+    """Convert the verified smoke level values into an alarm state."""
+
+    level = _int_value(value)
+    if level == 2:
+        return True
+    if level == 1:
+        return False
     return None
 
 
@@ -158,6 +169,7 @@ class HuaweiDeviceRuntime:
         self._humidifier_service: HumidifierService | None = None
         self._sensor_bindings: dict[str, tuple[str, str]] = {}
         self._binary_bindings: dict[str, tuple[str, str]] = {}
+        self._binary_semantics: dict[str, str] = {}
         self._number_bindings: dict[str, tuple[str, str]] = {}
         self._select_bindings: dict[str, tuple[str, str]] = {}
         self._rebuild_bindings()
@@ -648,6 +660,8 @@ class HuaweiDeviceRuntime:
             raise ValueError(f"unsupported binary sensor: {key}")
         sid, field = binding
         value = self.value(sid, field)
+        if self._binary_semantics.get(key) == "smoke_level":
+            return _smoke_level_is_on(value)
         if isinstance(value, str):
             return value.strip().lower() in {
                 "1", "true", "on", "open", "detected"
@@ -1107,6 +1121,7 @@ class HuaweiDeviceRuntime:
     def _build_generic_bindings(self) -> None:
         self._sensor_bindings = {}
         self._binary_bindings = {}
+        self._binary_semantics = {}
         self._number_bindings = {}
         self._select_bindings = {}
         ignored_control_kinds = {
@@ -1152,12 +1167,21 @@ class HuaweiDeviceRuntime:
                 )
                 if field is not None and key not in self._sensor_bindings:
                     self._sensor_bindings[key] = (sid, field)
-            if service_type in _BINARY_SERVICE_TYPES:
+            has_smoke_service = any(
+                candidate_sid in self._cloud_service_ids
+                and candidate_spec.kind == "smoke"
+                for candidate_sid, candidate_spec in self.profile.services.items()
+            )
+            if service_type in _BINARY_SERVICE_TYPES or (
+                service_type == "alarm" and has_smoke_service
+            ):
                 binary_fields = (
                     {"presence": _BINARY_FIELDS["presence"]}
                     if service_type == "pir"
                     else {"motion": _BINARY_FIELDS["motion"]}
                     if service_type == "motionsensor"
+                    else {"smoke": {"alarm"}}
+                    if service_type == "alarm" and has_smoke_service
                     else _BINARY_FIELDS
                 )
                 for key, candidates in binary_fields.items():
@@ -1165,8 +1189,15 @@ class HuaweiDeviceRuntime:
                         (item for item in candidates if item in fields),
                         None,
                     )
-                    if field is not None and key not in self._binary_bindings:
+                    if field is not None and (
+                        key not in self._binary_bindings or service_type == "alarm"
+                    ):
                         self._binary_bindings[key] = (sid, field)
+                        self._binary_semantics[key] = (
+                            "smoke_level"
+                            if service_type == "smoke" and field == "level"
+                            else "boolean"
+                        )
 
             fan_service = self._services_by_sid.get(sid)
             fan_fields: set[str] = set()
