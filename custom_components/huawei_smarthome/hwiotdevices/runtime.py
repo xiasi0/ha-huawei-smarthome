@@ -71,8 +71,8 @@ _SENSOR_RULES = {
         {"energy", "electricity", "TotalElectricity", "totalElectricity"},
     ),
     "formaldehyde": (
-        {"formaldehyde"},
-        {"current", "currentFloat", "concentration"},
+        {"formaldehyde", "hcho"},
+        ("currentFloat", "current", "concentration"),
     ),
     "gas_concentration": (
         {"equipmentstatus", "gas"},
@@ -1245,6 +1245,8 @@ class HuaweiDeviceRuntime:
                     binary_fields = {"gas": _BINARY_FIELDS["gas"]}
                 elif service_type == "smoke":
                     binary_fields = {"smoke": _BINARY_FIELDS["smoke"]}
+                elif service_type == "battery":
+                    binary_fields = {"battery_low": _BINARY_FIELDS["battery_low"]}
                 elif service_type == "alarm" and alarm_sensor_key is not None:
                     binary_fields = {alarm_sensor_key: {"alarm"}}
                 else:
