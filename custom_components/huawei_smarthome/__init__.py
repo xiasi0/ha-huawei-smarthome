@@ -147,13 +147,9 @@ async def async_remove_config_entry_device(
     if len(config_entries) > 1:
         return False
 
-    from .storage.credentials import HomeAssistantCredentialStore
     from homeassistant.helpers import device_registry
 
-    await HomeAssistantCredentialStore(hass).async_add_device_exclusion(
-        account,
-        identifiers[0],
-    )
+    await config_entry.runtime_data.async_exclude_device(identifiers[0])
     device_registry.async_get(hass).async_remove_device(device_entry.id)
     return True
 

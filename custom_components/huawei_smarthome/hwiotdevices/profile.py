@@ -135,6 +135,7 @@ class ProductProfile:
 
     prod_id: str
     model: str | None
+    device_name: str | None
     manufacturer: str | None
     ui_type: str | None
     plugin_tag: str | None
@@ -178,6 +179,7 @@ class ProductProfile:
         return cls(
             prod_id=prod_id,
             model=_text(value.get("deviceModel")),
+            device_name=_text(value.get("deviceName")),
             manufacturer=_text(value.get("manufacturerName")),
             ui_type=_text(value.get("uiType")),
             plugin_tag=_text(value.get("pluginTag")),

@@ -31,6 +31,7 @@ from .domain.models import (
     is_older_remote_timestamp,
 )
 from .errors import ReauthenticationRequired
+from .device_registry import device_identifier_value
 from .hwiotdevices.profile import ProductProfile
 from .hwiotdevices.runtime import HuaweiDeviceRuntime
 from .mqtt_client import HuaweiMqttClient
@@ -59,6 +60,13 @@ class CredentialStore(Protocol):
 
     async def async_get_device_exclusions(self, account: str) -> frozenset[str]:
         """Load devices excluded from the local HA projection."""
+
+    async def async_add_device_exclusion(
+        self,
+        account: str,
+        device_identifier: str,
+    ) -> None:
+        """Persist one device excluded from the local HA projection."""
 
 
 class HuaweiSmartHomeClient:
@@ -203,6 +211,22 @@ class HuaweiSmartHomeClient:
 
         await self._sync.async_request_full_sync("manual")
         return self.state
+
+    async def async_exclude_device(self, device_identifier: str) -> None:
+        """Exclude one device from the local HA projection."""
+
+        await self.credentials.async_add_device_exclusion(
+            self.account,
+            device_identifier,
+        )
+        self._excluded_device_ids = self._excluded_device_ids | {
+            device_identifier,
+        }
+        for key, device in tuple(self._hwiot_devices.items()):
+            if device_identifier_value(device.descriptor) != device_identifier:
+                continue
+            device.close()
+            self._hwiot_devices.pop(key, None)
 
     async def async_stop(self) -> None:
         """Stop MQTT and the account session."""
@@ -467,6 +491,7 @@ class HuaweiSmartHomeClient:
             if (
                 (device.node_type or "").strip().upper() == "GROUP"
                 or not device.dev_id
+                or self._is_excluded_device(device)
             ):
                 continue
             home_id = (
@@ -694,6 +719,8 @@ class HuaweiSmartHomeClient:
         for descriptor in self.state.devices.values():
             if (descriptor.node_type or "").strip().upper() == "GROUP":
                 continue
+            if self._is_excluded_device(descriptor):
+                continue
             profile = (
                 self._profiles.get(descriptor.prod_id.strip().lower())
                 if isinstance(descriptor.prod_id, str)
@@ -724,6 +751,11 @@ class HuaweiSmartHomeClient:
             if key not in current:
                 device.close()
         self._hwiot_devices = current
+
+    def _is_excluded_device(self, descriptor: RemoteDeviceDescriptor) -> bool:
+        """Return whether a remote device is excluded from HA projection."""
+
+        return device_identifier_value(descriptor) in self._excluded_device_ids
 
 
 def _device_home_index(

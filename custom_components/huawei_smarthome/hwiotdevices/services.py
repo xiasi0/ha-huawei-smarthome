@@ -24,11 +24,40 @@ def _as_bool(value: Any) -> bool | None:
     return None
 
 
+def _enum_boolean_state(value: Any, field: ProfileField) -> bool | None:
+    """Interpret an enum option as an on/off value when possible."""
+
+    if value is None:
+        return None
+    raw = str(value)
+    for option, description in field.enum_values:
+        if raw != option:
+            continue
+        option_text = option.strip().lower()
+        description_text = (description or "").strip().lower()
+        if option_text in {"0", "false", "off"} or any(
+            token in description_text for token in ("关", "停止", "off", "stop")
+        ):
+            return False
+        if option_text in {"1", "true", "on"} or any(
+            token in description_text for token in ("开", "开始", "on", "start")
+        ):
+            return True
+        try:
+            return float(option) != 0
+        except ValueError:
+            return None
+    return None
+
+
 def _coerce_profile_value(value: str, field: ProfileField) -> Any:
     """Convert a raw Profile enum value to its declared data type."""
 
     data_type = (field.data_type or "").strip().lower()
     if data_type in {"bool", "boolean"}:
+        text = value.strip().lower()
+        if text in {"0", "1"}:
+            return int(text)
         return _as_bool(value)
     if data_type in {"int", "integer"}:
         try:
@@ -40,6 +69,13 @@ def _coerce_profile_value(value: str, field: ProfileField) -> Any:
             return float(value)
         except ValueError:
             return value
+    if data_type == "enum":
+        text = value.strip()
+        try:
+            number = float(text)
+        except ValueError:
+            return value
+        return int(number) if number.is_integer() else number
     return value
 
 
@@ -231,6 +267,28 @@ class FanService(HuaweiService):
 
     percentage_field_names = ("speed", "gear", "windSpeed")
     preset_field_names = ("mode", "direction")
+    oscillation_field_names = ("angle", "oscillation", "oscillate", "swing")
+
+    def __init__(
+        self,
+        device: "HuaweiDeviceRuntime",
+        spec: ProfileService,
+    ) -> None:
+        super().__init__(device, spec)
+        self._preset_spec: ProfileService | None = None
+
+    def bind_preset_service(self, spec: ProfileService) -> None:
+        """Bind a separate mode service into the Fan projection."""
+
+        self._preset_spec = spec
+
+    @property
+    def preset_sid(self) -> str:
+        return (self._preset_spec or self.spec).sid
+
+    @property
+    def _preset_source(self) -> ProfileService:
+        return self._preset_spec or self.spec
 
     @property
     def percentage_field(self) -> tuple[str, ProfileField] | None:
@@ -242,9 +300,18 @@ class FanService(HuaweiService):
 
     @property
     def preset_field(self) -> tuple[str, ProfileField] | None:
+        source = self._preset_source
         for name in self.preset_field_names:
-            field = self.spec.field(name)
+            field = source.field(name)
             if field is not None and field.enum_options:
+                return name, field
+        return None
+
+    @property
+    def oscillation_field(self) -> tuple[str, ProfileField] | None:
+        for name in self.oscillation_field_names:
+            field = self.spec.field(name)
+            if field is not None and field.writable and field.enum_options:
                 return name, field
         return None
 
@@ -255,6 +322,10 @@ class FanService(HuaweiService):
     @property
     def supports_preset(self) -> bool:
         return self.preset_field is not None
+
+    @property
+    def supports_oscillation(self) -> bool:
+        return self.oscillation_field is not None
 
     @property
     def percentage_step(self) -> int | None:
@@ -300,11 +371,19 @@ class FanService(HuaweiService):
         if binding is None:
             return None
         name, field = binding
-        raw = self.value(name)
+        raw = self.device.value(self.preset_sid, name)
         for label, option in field.enum_options:
             if str(raw) == option:
                 return label
         return str(raw) if raw is not None else None
+
+    @property
+    def oscillating(self) -> bool | None:
+        binding = self.oscillation_field
+        if binding is None:
+            return None
+        name, field = binding
+        return _enum_boolean_state(self.value(name), field)
 
     async def async_set_percentage(self, value: int) -> None:
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
@@ -333,9 +412,23 @@ class FanService(HuaweiService):
         name, field = binding
         for label, raw in field.enum_options:
             if label == value:
-                await self.send({name: _coerce_profile_value(raw, field)})
+                await self.device.send_service(
+                    self.preset_sid,
+                    {name: _coerce_profile_value(raw, field)},
+                )
                 return
         raise ValueError(f"unsupported fan preset: {value}")
+
+    async def async_set_oscillating(self, value: bool) -> None:
+        binding = self.oscillation_field
+        if binding is None:
+            raise ValueError("fan oscillation is unavailable")
+        name, field = binding
+        for raw, _description in field.enum_values:
+            if _enum_boolean_state(raw, field) is value:
+                await self.send({name: _coerce_profile_value(raw, field)})
+                return
+        raise ValueError("fan oscillation values are missing from the Profile")
 
 
 class CoverService:
@@ -640,7 +733,11 @@ def create_basic_service(
         "wind",
     }:
         service = FanService(device, spec)
-        if service.supports_percentage or service.supports_preset:
+        if (
+            service.supports_percentage
+            or service.supports_preset
+            or service.supports_oscillation
+        ):
             return service
     return None
 

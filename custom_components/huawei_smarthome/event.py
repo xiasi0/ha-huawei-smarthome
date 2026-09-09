@@ -50,9 +50,9 @@ class HuaweiSmartHomeButtonEvent(EventEntity):
         self._device = device
         self._action = action
         self._attr_unique_id = f"{device.home_id}_{device.dev_id}_event_{action}"
-        self._attr_name = _EVENT_NAMES.get(
+        self._attr_name = device.button_event_names.get(
             action,
-            action.replace("_", " ").title(),
+            _EVENT_NAMES.get(action, action.replace("_", " ").title()),
         )
 
     @property

@@ -28,7 +28,7 @@ async def async_setup_entry(
             continue
         entities.extend(
             HuaweiSmartHomeSwitch(device, key, device.switch_names[key])
-            for key in device.switch_keys
+            for key in device.switch_entity_keys
         )
     async_add_entities(entities)
 

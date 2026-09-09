@@ -56,6 +56,8 @@ class SpeakerExtension:
     """Map speaker logical controls to the runtime speaker service."""
 
     required_sids = frozenset({"smartspeaker", "audioplayer"})
+    volume_fallback_prod_ids = frozenset({"X005"})
+    volume_fallback_range = (0.0, 100.0)
     binary_sensor_names = {"charging": "Charging"}
     binary_sensor_device_classes = {"charging": "battery_charging"}
     def __init__(self, device: "HuaweiDeviceRuntime") -> None:
@@ -79,7 +81,12 @@ class SpeakerExtension:
         return None
 
     def _volume_range(self) -> tuple[float, float] | None:
-        return _field_range(self._profile_field("smartspeaker", "volume"))
+        value_range = _field_range(self._profile_field("smartspeaker", "volume"))
+        if value_range is not None:
+            return value_range
+        if self.device.prod_id in self.volume_fallback_prod_ids:
+            return self.volume_fallback_range
+        return None
 
     def _play_control_field(self):
         return self._profile_field("smartspeaker", "playControl")
@@ -109,7 +116,10 @@ class SpeakerExtension:
         if action == "next":
             previous = self._control_value("previous")
             if previous is not None and previous == matches[0]:
-                return None
+                try:
+                    return str(int(previous) + 1)
+                except ValueError:
+                    return None
         return matches[0]
 
     @property
@@ -249,24 +259,27 @@ class SpeakerExtension:
         if not 0 <= level <= 1:
             raise ValueError("volume level must be between 0 and 1")
         field = self._profile_field("smartspeaker", "volume")
-        value_range = _field_range(field)
-        if field is None or value_range is None:
+        value_range = self._volume_range()
+        if value_range is None:
             raise ValueError("volume range is missing from the Profile")
         minimum, maximum = value_range
+        value = minimum + level * (maximum - minimum)
+        limit = self.device.value("battery", "restrictMaxVolume")
+        try:
+            if limit is not None:
+                value = min(value, float(limit))
+        except (TypeError, ValueError):
+            pass
+        if field is not None:
+            value = _quantize(value, field)
         await self.device.send_service(
             "smartspeaker",
-            {
-                "volume": _quantize(
-                    minimum + level * (maximum - minimum),
-                    field,
-                )
-            },
+            {"volume": value},
         )
 
     @property
     def supports_volume_control(self) -> bool:
-        field = self._profile_field("smartspeaker", "volume")
-        return field is not None and _field_range(field) is not None
+        return self._volume_range() is not None
 
     async def async_set_play_control(self, action: str) -> None:
         raw = self._control_value(action)

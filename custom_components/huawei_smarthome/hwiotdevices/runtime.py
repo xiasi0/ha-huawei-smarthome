@@ -187,6 +187,12 @@ class HuaweiDeviceRuntime:
         return self._descriptor.model or self.profile.model
 
     @property
+    def product_name(self) -> str:
+        """Return the Profile deviceName used by composite HA entities."""
+
+        return self.profile.device_name or self._descriptor.name
+
+    @property
     def manufacturer(self) -> str | None:
         return self._descriptor.manufacturer or self.profile.manufacturer
 
@@ -219,7 +225,7 @@ class HuaweiDeviceRuntime:
             platforms.add("humidifier")
         if self.button_event_actions:
             platforms.add("event")
-        if self.switch_keys and not is_light and self.cover_service is None and self.humidifier_service is None:
+        if self.switch_entity_keys:
             platforms.add("switch")
         if self._number_bindings:
             platforms.add("number")
@@ -251,6 +257,26 @@ class HuaweiDeviceRuntime:
         )
 
     @property
+    def switch_entity_keys(self) -> tuple[str, ...]:
+        """Return switch services not absorbed by another composite entity."""
+
+        if not self.switch_keys:
+            return ()
+        if (
+            any(
+                sid in self._services_by_sid
+                for sid in ("brightness", "colour", "cct")
+            )
+            or self.cover_service is not None
+            or self.humidifier_service is not None
+        ):
+            return ()
+        keys = self.switch_keys
+        if self.fan_service is not None and self._primary_switch_key is not None:
+            return tuple(key for key in keys if key != self._primary_switch_key)
+        return keys
+
+    @property
     def switch_names(self) -> Mapping[str, str]:
         names: dict[str, str] = {}
         for sid in self.switch_keys:
@@ -261,8 +287,9 @@ class HuaweiDeviceRuntime:
             else:
                 fallback = f"Switch {sid.removeprefix('switch')}"
             names[sid] = (
-                (spec.name if spec is not None else None)
+                (spec.description if spec is not None else None)
                 or (field.label if field is not None else None)
+                or (spec.name if spec is not None else None)
                 or fallback
             )
         return names
@@ -285,7 +312,8 @@ class HuaweiDeviceRuntime:
 
     @property
     def is_on(self) -> bool | None:
-        return self.switch_is_on("switch")
+        key = self._primary_switch_key
+        return self.switch_is_on(key) if key is not None else None
 
     def switch_is_on(self, key: str) -> bool | None:
         service = self._services_by_sid.get(key)
@@ -314,6 +342,12 @@ class HuaweiDeviceRuntime:
     @property
     def fan_is_on(self) -> bool | None:
         return self.is_on
+
+    @property
+    def fan_supports_turn_on_off(self) -> bool:
+        """Return whether the Fan composite has a switch service."""
+
+        return self._primary_switch_key is not None
 
     @property
     def cover_service(self) -> CoverService | None:
@@ -463,6 +497,22 @@ class HuaweiDeviceRuntime:
         await service.async_set_preset(value)
 
     @property
+    def fan_supports_oscillation(self) -> bool:
+        service = self.fan_service
+        return service is not None and service.supports_oscillation
+
+    @property
+    def fan_oscillating(self) -> bool | None:
+        service = self.fan_service
+        return service.oscillating if service is not None else None
+
+    async def async_set_oscillating(self, value: bool) -> None:
+        service = self.fan_service
+        if service is None:
+            raise ValueError("fan service is unavailable")
+        await service.async_set_oscillating(value)
+
+    @property
     def brightness(self) -> int | None:
         service = self._services_by_sid.get("brightness")
         return service.brightness if isinstance(service, BrightnessService) else None
@@ -520,7 +570,8 @@ class HuaweiDeviceRuntime:
             field = spec.field(field_name) if spec is not None else None
             if field is not None:
                 names[key] = (
-                    field.label
+                    (spec.description if spec is not None else None)
+                    or field.label
                     or field.description
                     or (spec.name if spec is not None else None)
                     or field_name
@@ -552,7 +603,8 @@ class HuaweiDeviceRuntime:
             field = spec.field(field_name) if spec is not None else None
             if field is not None:
                 names[key] = (
-                    field.label
+                    (spec.description if spec is not None else None)
+                    or field.label
                     or field.description
                     or (spec.name if spec is not None else None)
                     or key
@@ -641,6 +693,7 @@ class HuaweiDeviceRuntime:
             ):
                 continue
             label = field.label or field.description or f"{sid} {field_name}"
+            label = spec.description or label
             metadata[key] = (
                 label,
                 float(field.min_value),
@@ -687,7 +740,12 @@ class HuaweiDeviceRuntime:
             spec = self.profile.services.get(sid)
             field = spec.field(field_name) if spec is not None else None
             if field is not None:
-                names[key] = field.label or field.description or f"{sid} {field_name}"
+                names[key] = (
+                    spec.description
+                    or field.label
+                    or field.description
+                    or f"{sid} {field_name}"
+                )
         return names
 
     @property
@@ -913,6 +971,15 @@ class HuaweiDeviceRuntime:
             )
         )
 
+    @property
+    def button_event_names(self) -> Mapping[str, str]:
+        names: dict[str, str] = {}
+        for sid, _field_name, action in self._event_bindings():
+            spec = self.profile.services.get(sid)
+            if spec is not None:
+                names.setdefault(action, spec.description or action)
+        return names
+
     def add_event_listener(self, listener: EventListener) -> None:
         self._event_listeners.add(listener)
 
@@ -1008,6 +1075,7 @@ class HuaweiDeviceRuntime:
             )
             if service is not None
         }
+        self._bind_fan_preset_service()
         self._cover_service = create_cover_service(
             self,
             self.profile,
@@ -1020,6 +1088,21 @@ class HuaweiDeviceRuntime:
         )
         self._extensions = create_extensions(self)
         self._build_generic_bindings()
+
+    def _bind_fan_preset_service(self) -> None:
+        service = self._services_by_sid.get("fan")
+        if not isinstance(service, FanService):
+            return
+        for sid, spec in self.profile.services.items():
+            if sid == service.sid or sid not in self._cloud_service_ids:
+                continue
+            if spec.kind not in {"mode", "fanmode"}:
+                continue
+            for field_name in service.preset_field_names:
+                field = spec.field(field_name)
+                if field is not None and field.enum_options:
+                    service.bind_preset_service(spec)
+                    return
 
     def _build_generic_bindings(self) -> None:
         self._sensor_bindings = {}
@@ -1073,6 +1156,8 @@ class HuaweiDeviceRuntime:
                 binary_fields = (
                     {"presence": _BINARY_FIELDS["presence"]}
                     if service_type == "pir"
+                    else {"motion": _BINARY_FIELDS["motion"]}
+                    if service_type == "motionsensor"
                     else _BINARY_FIELDS
                 )
                 for key, candidates in binary_fields.items():
@@ -1090,6 +1175,8 @@ class HuaweiDeviceRuntime:
                     fan_fields.add(fan_service.percentage_field[0])
                 if fan_service.preset_field is not None:
                     fan_fields.add(fan_service.preset_field[0])
+                if fan_service.oscillation_field is not None:
+                    fan_fields.add(fan_service.oscillation_field[0])
             if service_type not in ignored_control_kinds:
                 for field_name, field in spec.fields.items():
                     if not field.writable or field_name in fan_fields:
@@ -1136,6 +1223,13 @@ class HuaweiDeviceRuntime:
                 and sid == self.humidifier_service.gear_spec.sid
             ):
                 return True
+        fan_service = self.fan_service
+        if (
+            fan_service is not None
+            and sid == fan_service.preset_sid
+            and sid != fan_service.sid
+        ):
+            return True
         return False
 
     def _event_service_ids(self) -> frozenset[str]:

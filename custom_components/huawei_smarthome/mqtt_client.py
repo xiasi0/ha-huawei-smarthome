@@ -149,9 +149,11 @@ class HuaweiMqttClient:
             raise MqttConnectionError("MQTT command credentials are unavailable")
         if not target or not request_id:
             raise MqttConfigurationError("MQTT command route is incomplete")
+        command_body = dict(body)
+        command_body.pop("requestId", None)
         payload = json.dumps(
             {
-                "body": body,
+                "body": command_body,
                 "header": {
                     "accessToken": settings.password,
                     "ctrlSrc": settings.control_source,
