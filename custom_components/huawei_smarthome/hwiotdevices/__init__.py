@@ -1,1 +1,1 @@
-"""Huawei SmartHome Profile-backed device runtime."""
+"""Huawei SmartHome protocol package definitions."""

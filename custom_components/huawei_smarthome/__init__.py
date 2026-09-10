@@ -5,7 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import TYPE_CHECKING
 
-from .const import CONF_ACCOUNT, CONF_SELECTED_HOME_IDS, DOMAIN, PLATFORMS
+from .const import CONF_ACCOUNT, CONF_SELECTED_HOME_IDS, DOMAIN
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -92,7 +92,6 @@ async def async_setup_entry(
         client.devices.values(),
         excluded_device_ids=client.excluded_device_ids,
     )
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
@@ -102,12 +101,6 @@ async def async_unload_entry(
 ) -> bool:
     """Unload one Huawei SmartHome account."""
 
-    unload_ok = await hass.config_entries.async_unload_platforms(
-        entry,
-        PLATFORMS,
-    )
-    if not unload_ok:
-        return False
     await entry.runtime_data.async_stop()
     return True
 
