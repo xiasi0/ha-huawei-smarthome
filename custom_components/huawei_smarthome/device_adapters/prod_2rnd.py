@@ -16,6 +16,25 @@ cover on/off, brightness and colour temperature, and HA rejects combining
 colour mode is advertised.  If the Profile does not describe both a brightness
 range and a colour temperature range, no light entity is created at all.
 
+Additional control entities (all backed by rendered cards in the vendor H5
+bundle ``data/index.data.js``):
+
+* ``switch`` "指示灯"        <- ``indicator.on``              (bool RW)
+* ``select`` "断电记忆"      <- ``commonMemorySwitch.status`` (enum RW 0/1/2)
+* ``number`` "渐变时长"      <- ``fadeTimeSetting.fadeTimeMs`` (int 0..5 s)
+* ``binary_sensor`` "故障"   <- ``commonFaultDetection.status`` (bool R)
+* ``sensor`` "故障码"        <- ``commonFaultDetection.code``   (enum R)
+
+Deliberately *not* exposed:
+
+* ``lightCurveSetting`` — the Profile states this is only available in the
+  vendor's 易维 app ("此功能不在智慧生活APP开放"), and the H5 bundle has no
+  dedicated rendered card for it (it only appears inside a shared enum map).
+* ``relBrightness`` — ``enable`` is a capability flag ("是否支持") and
+  ``rotaStatus``/``relBrightness``/``fadetimeMs`` belong to an accessory-knob
+  calibration flow; no rendered UI card drives them in this bundle.
+* ``update`` — OTA diagnostics, consistent with the other adapters.
+
 Brightness scaling: the device reports a percentage in 1..100, while HA uses
 0..255 and treats 0 as "off".  The mapping therefore targets 1..255 so the
 lowest device step stays a visible level instead of collapsing into HA's "off"
@@ -42,6 +61,29 @@ _BRIGHTNESS_SID = "brightness"
 _BRIGHTNESS_FIELD = "brightness"
 _CCT_SID = "cct"
 _CCT_FIELD = "colorTemperature"
+
+# Indicator light: GeneralBoolIconCard1 in the vendor H5 (开=1 / 关=0).
+_INDICATOR_SID = "indicator"
+_INDICATOR_FIELD = "on"
+
+# Power-failure memory: GeneralEnumDroplistCard1 droplist in the vendor H5.
+_MEMORY_SID = "commonMemorySwitch"
+_MEMORY_FIELD = "status"
+_MEMORY_OPTIONS = (
+    (0, "来电关灯"),
+    (1, "来电开灯"),
+    (2, "来电保持断电前的状态"),
+)
+
+# Fade time: GeneralIntCard3 in the vendor H5, unit "s", int 0..5.
+_FADE_SID = "fadeTimeSetting"
+_FADE_FIELD = "fadeTimeMs"
+
+# Fault detection: read-only; GeneralWarn banner consumes the same fields.
+_FAULT_SID = "commonFaultDetection"
+_FAULT_STATUS_FIELD = "status"
+_FAULT_CODE_FIELD = "code"
+_FAULT_CODE_LABELS = {0: "正常", 1: "短路", 2: "开路"}
 
 # HA's brightness scale.  The floor is 1, not 0, because HA renders 0 as "off".
 _HA_BRIGHTNESS_MIN = 1
@@ -205,6 +247,50 @@ async def _turn_off(context: DeviceContext, _data: Mapping[str, Any]) -> None:
     await context.async_send_service(_SWITCH_SID, {_SWITCH_FIELD: 0})
 
 
+async def _indicator_turn_on(context: DeviceContext, _data: Mapping[str, Any]) -> None:
+    await context.async_send_service(_INDICATOR_SID, {_INDICATOR_FIELD: 1})
+
+
+async def _indicator_turn_off(context: DeviceContext, _data: Mapping[str, Any]) -> None:
+    await context.async_send_service(_INDICATOR_SID, {_INDICATOR_FIELD: 0})
+
+
+def _memory_label(value: Any) -> str | None:
+    number = _number(value)
+    if number is None:
+        return None
+    for enum_value, label in _MEMORY_OPTIONS:
+        if number == enum_value:
+            return label
+    return None
+
+
+def _memory_select(context: DeviceContext, data: Mapping[str, Any]) -> None:
+    option = data.get("option")
+    for enum_value, label in _MEMORY_OPTIONS:
+        if option == label:
+            return enum_value
+    raise ValueError(f"unknown option: {option!r}")
+
+
+async def _memory_select_option(
+    context: DeviceContext,
+    data: Mapping[str, Any],
+) -> None:
+    value = _memory_select(context, data)
+    await context.async_send_service(_MEMORY_SID, {_MEMORY_FIELD: value})
+
+
+async def _fade_set_value(context: DeviceContext, data: Mapping[str, Any]) -> None:
+    field = _field(context.profile or {}, _FADE_SID, _FADE_FIELD)
+    if field is None:
+        raise ValueError("2RND fade time field is missing from the Profile")
+    await context.async_send_service(
+        _FADE_SID,
+        {_FADE_FIELD: _clamp_to_profile(data.get("value"), field)},
+    )
+
+
 class Product2rndAdapter:
     """Keep all 2RND entity and command choices in this file."""
 
@@ -239,7 +325,7 @@ class Product2rndAdapter:
                 "color_mode": _COLOR_MODE_CCT,
             }
 
-        return (
+        specs: list[EntitySpec] = [
             EntitySpec(
                 platform="light",
                 key="light",
@@ -257,7 +343,120 @@ class Product2rndAdapter:
                     "turn_off": _turn_off,
                 },
             ),
-        )
+        ]
+
+        # 指示灯开关: the H5 label is "指示灯开关" but the switch platform
+        # already implies the 开关 semantics, so the entity is named 指示灯.
+        if context.has_service(_INDICATOR_SID) and _field(
+            profile, _INDICATOR_SID, _INDICATOR_FIELD
+        ) is not None:
+            specs.append(
+                EntitySpec(
+                    platform="switch",
+                    key="indicator",
+                    name="指示灯",
+                    state=lambda device: {
+                        "is_on": _bool(
+                            device.value(_INDICATOR_SID, _INDICATOR_FIELD)
+                        )
+                    },
+                    actions={
+                        "turn_on": _indicator_turn_on,
+                        "turn_off": _indicator_turn_off,
+                    },
+                )
+            )
+
+        # 断电记忆 (power-failure memory).
+        if context.has_service(_MEMORY_SID) and _field(
+            profile, _MEMORY_SID, _MEMORY_FIELD
+        ) is not None:
+            def memory_state(device: DeviceContext) -> Mapping[str, Any]:
+                return {"current_option": _memory_label(
+                    device.value(_MEMORY_SID, _MEMORY_FIELD)
+                )}
+
+            specs.append(
+                EntitySpec(
+                    platform="select",
+                    key="memory_switch",
+                    name="断电记忆",
+                    state=memory_state,
+                    metadata={
+                        "options": [label for _, label in _MEMORY_OPTIONS]
+                    },
+                    actions={"select_option": _memory_select_option},
+                )
+            )
+
+        # 渐变时长 (fade time in seconds).
+        fade_field = _field(profile, _FADE_SID, _FADE_FIELD)
+        fade_range = _profile_range(fade_field)
+        if context.has_service(_FADE_SID) and fade_range is not None:
+            def fade_state(device: DeviceContext) -> Mapping[str, Any]:
+                return {"native_value": _number(
+                    device.value(_FADE_SID, _FADE_FIELD)
+                )}
+
+            specs.append(
+                EntitySpec(
+                    platform="number",
+                    key="fade_time",
+                    name="渐变时长",
+                    state=fade_state,
+                    metadata={
+                        "min": fade_range[0],
+                        "max": fade_range[1],
+                        "step": _profile_step(fade_field) or 1,
+                        # Profile `unit` is empty; the H5 card and the Profile
+                        # desc ("单位s") both state seconds.
+                        "unit": "s",
+                    },
+                    actions={"set_value": _fade_set_value},
+                )
+            )
+
+        # 故障检测: read-only status + error code.
+        fault_status = _field(profile, _FAULT_SID, _FAULT_STATUS_FIELD)
+        if context.has_service(_FAULT_SID) and fault_status is not None:
+            def fault_state(device: DeviceContext) -> Mapping[str, Any]:
+                return {
+                    "is_on": _bool(
+                        device.value(_FAULT_SID, _FAULT_STATUS_FIELD)
+                    )
+                }
+
+            specs.append(
+                EntitySpec(
+                    platform="binary_sensor",
+                    key="fault",
+                    name="故障",
+                    state=fault_state,
+                    metadata={"device_class": "problem"},
+                )
+            )
+
+        fault_code = _field(profile, _FAULT_SID, _FAULT_CODE_FIELD)
+        if context.has_service(_FAULT_SID) and fault_code is not None:
+            def fault_code_state(device: DeviceContext) -> Mapping[str, Any]:
+                # Unknown enum values stay unknown rather than guessing a label.
+                number = _number(device.value(_FAULT_SID, _FAULT_CODE_FIELD))
+                return {
+                    "native_value": _FAULT_CODE_LABELS.get(number)
+                    if number is not None
+                    else None
+                }
+
+            specs.append(
+                EntitySpec(
+                    platform="sensor",
+                    key="fault_code",
+                    name="故障码",
+                    state=fault_code_state,
+                )
+            )
+
+        return tuple(specs)
 
 
 ADAPTER = Product2rndAdapter()
