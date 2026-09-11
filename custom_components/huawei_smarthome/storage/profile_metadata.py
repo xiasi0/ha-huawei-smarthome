@@ -8,7 +8,6 @@ import logging
 from typing import Any, Protocol
 
 from ..const import PROFILE_CDN_BASE_URL, PROFILE_CDN_PATH
-from ..hwiotdevices.profile import ProductProfile
 from .locking import storage_lock
 
 
@@ -17,19 +16,19 @@ PROFILE_STORAGE_PREFIX = "huawei_smarthome/profiles"
 _LOGGER = logging.getLogger(__name__)
 
 
-class ProductProfileStore(Protocol):
-    """Load normalized public Profiles keyed by product ID."""
+class ProfileStore(Protocol):
+    """Load raw public Profiles keyed by product ID."""
 
     async def async_get_profiles(
         self,
         prod_ids: Iterable[str],
-    ) -> dict[str, ProductProfile]:
+    ) -> dict[str, Mapping[str, Any]]:
         """Return cached or downloaded Profiles."""
 
     async def async_get_cached_profiles(
         self,
         prod_ids: Iterable[str],
-    ) -> dict[str, ProductProfile]:
+    ) -> dict[str, Mapping[str, Any]]:
         """Return only locally cached Profiles."""
 
 
@@ -47,8 +46,8 @@ def profile_storage_key(prod_id: str) -> str:
     return f"{PROFILE_STORAGE_PREFIX}/{prod_id}.json"
 
 
-class HomeAssistantProductProfileStore:
-    """Persist and fetch one public Profile per product ID."""
+class HomeAssistantProfileStore:
+    """Persist and fetch one raw public Profile per product ID."""
 
     def __init__(
         self,
@@ -81,7 +80,7 @@ class HomeAssistantProductProfileStore:
     async def async_get_profiles(
         self,
         prod_ids: Iterable[str],
-    ) -> dict[str, ProductProfile]:
+    ) -> dict[str, Mapping[str, Any]]:
         """Load unique product Profiles with bounded concurrency."""
 
         unique = tuple(
@@ -99,7 +98,7 @@ class HomeAssistantProductProfileStore:
         )
         semaphore = asyncio.Semaphore(8)
 
-        async def load(prod_id: str) -> tuple[str, ProductProfile] | None:
+        async def load(prod_id: str) -> tuple[str, Mapping[str, Any]] | None:
             async with semaphore:
                 profile = await self.async_get_profile(prod_id)
                 return (prod_id, profile) if profile is not None else None
@@ -116,7 +115,7 @@ class HomeAssistantProductProfileStore:
     async def async_get_cached_profiles(
         self,
         prod_ids: Iterable[str],
-    ) -> dict[str, ProductProfile]:
+    ) -> dict[str, Mapping[str, Any]]:
         """Read unique product Profiles without network I/O."""
 
         unique = sorted(
@@ -126,7 +125,7 @@ class HomeAssistantProductProfileStore:
                 if isinstance(item, str) and item.strip()
             }
         )
-        profiles: dict[str, ProductProfile] = {}
+        profiles: dict[str, Mapping[str, Any]] = {}
         for prod_id in unique:
             storage_key = profile_storage_key(prod_id)
             async with storage_lock(storage_key):
@@ -136,8 +135,11 @@ class HomeAssistantProductProfileStore:
                 profiles[prod_id] = profile
         return profiles
 
-    async def async_get_profile(self, prod_id: str) -> ProductProfile | None:
-        """Load a Profile from Store, fetching the public CDN on a miss."""
+    async def async_get_profile(
+        self,
+        prod_id: str,
+    ) -> Mapping[str, Any] | None:
+        """Load one raw Profile from Store or the public CDN."""
 
         storage_key = profile_storage_key(prod_id)
         async with storage_lock(storage_key):
@@ -156,7 +158,7 @@ class HomeAssistantProductProfileStore:
                     if response.status != 200:
                         raise RuntimeError(f"HTTP {response.status}")
                     payload = await response.json(content_type=None)
-                profile = ProductProfile.from_payload(payload)
+                profile = _profile_from_payload(payload)
             except Exception as error:  # noqa: BLE001 - Profile is optional
                 _LOGGER.debug(
                     "Huawei SmartHome Profile unavailable: prod_id=%s error=%s",
@@ -168,13 +170,16 @@ class HomeAssistantProductProfileStore:
             return profile
 
 
-def _profile_from_storage(value: Any) -> ProductProfile | None:
+def _profile_from_payload(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or not value.get("prodId"):
+        raise ValueError("Profile has no prodId")
+    return dict(value)
+
+
+def _profile_from_storage(value: Any) -> Mapping[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
     payload = value.get("profile")
     if not isinstance(payload, Mapping) or not payload.get("prodId"):
         return None
-    try:
-        return ProductProfile.from_payload(payload)
-    except ValueError:
-        return None
+    return dict(payload)

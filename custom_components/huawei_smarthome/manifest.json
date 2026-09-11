@@ -3,7 +3,7 @@
   "name": "Huawei SmartHome",
   "codeowners": [],
   "config_flow": true,
-  "documentation": "https://github.com/xiasi0/huawei-ailife",
+  "documentation": "https://github.com/xiasi0/ha-huawei-smarthome",
   "integration_type": "hub",
   "iot_class": "cloud_push",
   "requirements": ["cryptography>=42.0.0", "paho-mqtt>=2.0.0"],

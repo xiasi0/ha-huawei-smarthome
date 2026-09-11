@@ -32,11 +32,11 @@ from .domain.models import (
 )
 from .errors import ReauthenticationRequired
 from .device_registry import device_identifier_value
-from .hwiotdevices.profile import ProductProfile
-from .hwiotdevices.runtime import HuaweiDeviceRuntime
+from .device_adapters.api import HuaweiProductAdapter
+from .device_adapters.context import DeviceContext
 from .mqtt_client import HuaweiMqttClient
 from .storage.credentials import CredentialBindingError
-from .storage.profile_metadata import ProductProfileStore
+from .storage.profile_metadata import ProfileStore
 from .storage.state import AccountStateStore
 from .sync_coordinator import SmartHomeSyncCoordinator
 
@@ -81,7 +81,8 @@ class HuaweiSmartHomeClient:
         credential_store: CredentialStore,
         state_store: AccountStateStore,
         api: SmartHomeDiscoveryApi,
-        profile_store: ProductProfileStore | None = None,
+        profile_store: ProfileStore | None = None,
+        adapters: Mapping[str, HuaweiProductAdapter] | None = None,
         mqtt: HuaweiMqttClient | None = None,
         mqtt_enabled: bool = True,
         reconnect_min: float = 5.0,
@@ -97,6 +98,10 @@ class HuaweiSmartHomeClient:
         self.state_store = state_store
         self.api = api
         self.profile_store = profile_store
+        self._adapters = {
+            key.casefold(): adapter
+            for key, adapter in (adapters or {}).items()
+        }
         self.selected_home_ids = selected_home_ids or None
         self.mqtt_enabled = mqtt_enabled
         self.mqtt = mqtt or HuaweiMqttClient(
@@ -111,8 +116,8 @@ class HuaweiSmartHomeClient:
         self._excluded_device_ids: frozenset[str] = frozenset()
         self._reconnect_task: asyncio.Task[None] | None = None
         self._operation_lock = asyncio.Lock()
-        self._hwiot_devices: dict[tuple[str, str], HuaweiDeviceRuntime] = {}
-        self._profiles: dict[str, ProductProfile] = {}
+        self._profiles: dict[str, Mapping[str, object]] = {}
+        self._protocol_devices: dict[tuple[str, str], DeviceContext] = {}
         self._reconnect_min = reconnect_min
         self._reconnect_max = reconnect_max
         self._started = False
@@ -140,10 +145,16 @@ class HuaweiSmartHomeClient:
         return self._excluded_device_ids
 
     @property
-    def hwiot_devices(self) -> Mapping[tuple[str, str], HuaweiDeviceRuntime]:
-        """Return instantiated product devices."""
+    def profiles(self) -> Mapping[str, Mapping[str, object]]:
+        """Return raw persisted Product Profiles keyed by product ID."""
 
-        return self._hwiot_devices
+        return self._profiles
+
+    @property
+    def protocol_devices(self) -> Mapping[tuple[str, str], DeviceContext]:
+        """Return raw contexts exposed to adapters and generic HA entities."""
+
+        return self._protocol_devices
 
     async def async_start(self) -> None:
         """Restore the account, discover devices and start MQTT."""
@@ -222,11 +233,11 @@ class HuaweiSmartHomeClient:
         self._excluded_device_ids = self._excluded_device_ids | {
             device_identifier,
         }
-        for key, device in tuple(self._hwiot_devices.items()):
-            if device_identifier_value(device.descriptor) != device_identifier:
+        for key, context in tuple(self._protocol_devices.items()):
+            if device_identifier_value(context.descriptor) != device_identifier:
                 continue
-            device.close()
-            self._hwiot_devices.pop(key, None)
+            context.close()
+            self._protocol_devices.pop(key, None)
 
     async def async_stop(self) -> None:
         """Stop MQTT and the account session."""
@@ -237,9 +248,9 @@ class HuaweiSmartHomeClient:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        for device in self._hwiot_devices.values():
-            device.close()
-        self._hwiot_devices.clear()
+        for context in self._protocol_devices.values():
+            context.close()
+        self._protocol_devices.clear()
         await self.mqtt.async_stop()
         if self.session_manager is not None:
             await self.session_manager.async_stop()
@@ -260,7 +271,7 @@ class HuaweiSmartHomeClient:
             raise RuntimeError("Huawei SmartHome snapshot contains duplicate devices")
         self.state.homes = {home.home_id: home for home in snapshot.homes}
         self.state.devices = devices
-        self._sync_hwiot_devices()
+        self._sync_protocol_devices()
         self.state.device_home_index = _device_home_index(snapshot)
         try:
             await self._refresh_dynamic_states(
@@ -411,29 +422,26 @@ class HuaweiSmartHomeClient:
             )
         if not self._profiles:
             return snapshot
-        return replace(
-            snapshot,
-            devices=tuple(
+        devices: list[RemoteDeviceDescriptor] = []
+        for device in snapshot.devices:
+            profile = (
+                self._profiles.get(device.prod_id.strip().lower())
+                if isinstance(device.prod_id, str)
+                else None
+            )
+            devices.append(
                 replace(
                     device,
-                    model=(
-                        self._profiles[device.prod_id.strip().lower()].model
-                        if isinstance(device.prod_id, str)
-                        and device.prod_id.strip().lower() in self._profiles
-                        and self._profiles[device.prod_id.strip().lower()].model
-                        else
-                        device.model
-                    ),
+                    model=_profile_text(profile, "deviceModel") or device.model,
                     manufacturer=(
-                        self._profiles[device.prod_id.strip().lower()].manufacturer
-                        if isinstance(device.prod_id, str)
-                        and device.prod_id.strip().lower() in self._profiles
-                        and self._profiles[device.prod_id.strip().lower()].manufacturer
-                        else device.manufacturer
-                    )
+                        _profile_text(profile, "manufacturerName")
+                        or device.manufacturer
+                    ),
                 )
-                for device in snapshot.devices
-            ),
+            )
+        return replace(
+            snapshot,
+            devices=tuple(devices),
         )
 
     async def _refresh_profiles_in_background(self) -> None:
@@ -547,14 +555,15 @@ class HuaweiSmartHomeClient:
             if merged != descriptor:
                 self.state.devices[key] = merged
                 changed = True
-            runtime = self._hwiot_devices.get(key)
-            if runtime is None:
+            context = self._protocol_devices.get(key)
+            if context is None:
                 continue
-            changed = (
-                runtime.apply_state_snapshot(state.services, online=state.online)
-                or changed
+            context.apply_state_snapshot(state.services, online=state.online)
+            context.update(
+                merged,
+                self._profile_for_device(merged),
+                self._adapter_for_device(merged),
             )
-            runtime.update_descriptor(merged)
         return changed
 
     async def _discover_with_token_recovery(
@@ -706,56 +715,71 @@ class HuaweiSmartHomeClient:
     def _mqtt_message_received(self, topic: str, payload: bytes) -> None:
         """Route one MQTT payload to the matching product devices."""
 
+        del topic
         self.state.last_event_at = datetime.now(timezone.utc)
         if self._started and self._sync.is_topology_event(payload):
             self._sync.schedule_full_sync("mqtt_topology_event")
-        for device in tuple(self._hwiot_devices.values()):
-            device.handle_mqtt_message(topic, payload)
+        for context in tuple(self._protocol_devices.values()):
+            context.handle_mqtt_message(payload)
 
-    def _sync_hwiot_devices(self) -> None:
-        """Keep Profile-backed runtimes aligned with the latest snapshot."""
+    def _profile_for_device(
+        self,
+        descriptor: RemoteDeviceDescriptor,
+    ) -> Mapping[str, object] | None:
+        if not isinstance(descriptor.prod_id, str):
+            return None
+        return self._profiles.get(descriptor.prod_id.strip().casefold())
 
-        current: dict[tuple[str, str], HuaweiDeviceRuntime] = {}
+    def _adapter_for_device(
+        self,
+        descriptor: RemoteDeviceDescriptor,
+    ) -> HuaweiProductAdapter | None:
+        if not isinstance(descriptor.prod_id, str):
+            return None
+        return self._adapters.get(descriptor.prod_id.strip().casefold())
+
+    def _sync_protocol_devices(self) -> None:
+        current: dict[tuple[str, str], DeviceContext] = {}
         for descriptor in self.state.devices.values():
             if (descriptor.node_type or "").strip().upper() == "GROUP":
                 continue
             if self._is_excluded_device(descriptor):
                 continue
-            profile = (
-                self._profiles.get(descriptor.prod_id.strip().lower())
-                if isinstance(descriptor.prod_id, str)
-                else None
-            )
-            existing = self._hwiot_devices.get(descriptor.key)
-            if profile is None:
-                if existing is not None:
-                    existing.close()
-                continue
-            if (
-                existing is not None
-                and isinstance(existing, HuaweiDeviceRuntime)
-                and str(existing.prod_id).strip().lower()
-                == str(descriptor.prod_id or "").strip().lower()
-            ):
-                existing.update_descriptor(descriptor)
-                current[descriptor.key] = existing
-                continue
-            if existing is not None:
-                existing.close()
-            current[descriptor.key] = HuaweiDeviceRuntime(
-                descriptor,
-                self.mqtt,
-                profile,
-            )
-        for key, device in self._hwiot_devices.items():
+            key = descriptor.key
+            context = self._protocol_devices.get(key)
+            profile = self._profile_for_device(descriptor)
+            adapter = self._adapter_for_device(descriptor)
+            if context is None:
+                context = DeviceContext(
+                    descriptor,
+                    profile,
+                    self.mqtt,
+                    adapter,
+                )
+            else:
+                context.update(descriptor, profile, adapter)
+            current[key] = context
+        for key, context in self._protocol_devices.items():
             if key not in current:
-                device.close()
-        self._hwiot_devices = current
-
+                context.close()
+        self._protocol_devices = current
     def _is_excluded_device(self, descriptor: RemoteDeviceDescriptor) -> bool:
         """Return whether a remote device is excluded from HA projection."""
 
         return device_identifier_value(descriptor) in self._excluded_device_ids
+
+
+def _profile_text(
+    profile: Mapping[str, object] | None,
+    key: str,
+) -> str | None:
+    if profile is None:
+        return None
+    value = profile.get(key)
+    if value is None or isinstance(value, (Mapping, list, tuple, set)):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _device_home_index(

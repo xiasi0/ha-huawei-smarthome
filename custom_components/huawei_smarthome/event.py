@@ -1,4 +1,4 @@
-"""Home Assistant event projection for Profile-backed wireless buttons."""
+"""Generic Home Assistant event registration for product adapters."""
 
 from __future__ import annotations
 
@@ -7,86 +7,22 @@ from typing import Any
 from homeassistant.components.event import EventDeviceClass, EventEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .device_registry import device_identifier, profile_configuration_url
-
-_EVENT_NAMES = {
-    "single": "Single press",
-    "double": "Double press",
-    "long": "Long press",
-    "key_event": "Key event",
-    "button_pressed": "Button pressed",
-    "ring": "Ring",
-}
+from .entity_helpers import AdapterEntityMixin, iter_specs
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Create one event entity per Profile-declared button action."""
-
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     del hass
-    client = entry.runtime_data
-    entities = []
-    for device in client.hwiot_devices.values():
-        for action in device.button_event_actions:
-            entities.append(HuaweiSmartHomeButtonEvent(device, action))
-    async_add_entities(entities)
+    async_add_entities(HuaweiAdapterEvent(context, spec) for context, spec in iter_specs(entry.runtime_data, "event"))
 
 
-class HuaweiSmartHomeButtonEvent(EventEntity):
-    """Expose one physical button action as an HA event."""
+class HuaweiAdapterEvent(AdapterEntityMixin, EventEntity):
+    def __init__(self, context: Any, spec: Any) -> None:
+        self._init_adapter_entity(context, spec)
+        if spec.metadata.get("device_class"):
+            self._attr_device_class = EventDeviceClass(spec.metadata["device_class"])
+        self._attr_event_types = list(spec.metadata.get("event_types", ("event",)))
 
-    _attr_device_class = EventDeviceClass.BUTTON
-    _attr_event_types = ["pressed"]
-    _attr_has_entity_name = True
-    _attr_should_poll = False
-
-    def __init__(self, device: Any, action: str) -> None:
-        self._device = device
-        self._action = action
-        self._attr_unique_id = f"{device.home_id}_{device.dev_id}_event_{action}"
-        self._attr_name = device.button_event_names.get(
-            action,
-            _EVENT_NAMES.get(action, action.replace("_", " ").title()),
-        )
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={device_identifier(self._device.descriptor)},
-            name=self._device.name,
-            manufacturer=self._device.manufacturer,
-            model=self._device.model,
-            sw_version=self._device.firmware_version,
-            configuration_url=profile_configuration_url(self._device.prod_id),
-        )
-
-    @property
-    def available(self) -> bool:
-        return self._device.available
-
-    async def async_added_to_hass(self) -> None:
-        self._device.add_event_listener(self._event_received)
-
-    async def async_will_remove_from_hass(self) -> None:
-        self._device.remove_event_listener(self._event_received)
-
-    def _event_received(self, event: Any) -> None:
-        if event.action != self._action:
-            return
-        self._trigger_event(
-            "pressed",
-            {
-                "action": event.action,
-                "button_id": event.button_id,
-                "key_code": event.key_code,
-                "name": event.name,
-                "timestamp": event.timestamp,
-            },
-        )
-        self.async_write_ha_state()
+    def trigger(self, event_type: str = "event", event_data: dict[str, Any] | None = None) -> None:
+        self._trigger_event(event_type, event_data or {})

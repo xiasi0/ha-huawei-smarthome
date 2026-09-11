@@ -1,105 +1,36 @@
-"""Home Assistant cover projection for Profile-backed curtain devices."""
+"""Generic Home Assistant cover registration for product adapters."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.cover import (
-    ATTR_POSITION,
-    CoverEntity,
-    CoverEntityFeature,
-)
+from homeassistant.components.cover import CoverEntity, CoverEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .device_registry import device_identifier, profile_configuration_url
+from .entity_helpers import AdapterEntityMixin, iter_specs
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Create covers from Profile-backed runtime compositions."""
-
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     del hass
-    client = entry.runtime_data
-    async_add_entities(
-        HuaweiSmartHomeCover(device)
-        for device in client.hwiot_devices.values()
-        if "cover" in device.ha_platforms
-    )
+    async_add_entities(HuaweiAdapterCover(context, spec) for context, spec in iter_specs(entry.runtime_data, "cover"))
 
 
-class HuaweiSmartHomeCover(CoverEntity):
-    """Project one Profile-backed curtain or blind as a cover."""
-
-    def __init__(self, device: Any) -> None:
-        self._device = device
-        self._attr_unique_id = f"{device.home_id}_{device.dev_id}_cover"
-        self._attr_name = device.product_name
-        self._attr_has_entity_name = True
-        self._attr_should_poll = False
+class HuaweiAdapterCover(AdapterEntityMixin, CoverEntity):
+    def __init__(self, context: Any, spec: Any) -> None:
+        self._init_adapter_entity(context, spec)
         features = CoverEntityFeature(0)
-        supported = device.cover_supported_features
-        if "open" in supported:
-            features |= CoverEntityFeature.OPEN
-        if "close" in supported:
-            features |= CoverEntityFeature.CLOSE
-        if "stop" in supported:
-            features |= CoverEntityFeature.STOP
-        if "position" in supported:
-            features |= CoverEntityFeature.SET_POSITION
+        for action, feature in (("open", CoverEntityFeature.OPEN), ("close", CoverEntityFeature.CLOSE), ("stop", CoverEntityFeature.STOP), ("set_position", CoverEntityFeature.SET_POSITION)):
+            if action in spec.actions:
+                features |= feature
         self._attr_supported_features = features
 
     @property
-    def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={device_identifier(self._device.descriptor)},
-            name=self._device.name,
-            manufacturer=self._device.manufacturer,
-            model=self._device.model,
-            sw_version=self._device.firmware_version,
-            configuration_url=profile_configuration_url(self._device.prod_id),
-        )
-
+    def is_closed(self): return self._state_value("is_closed")
     @property
-    def available(self) -> bool:
-        return self._device.available
-
-    @property
-    def is_closed(self) -> bool | None:
-        return self._device.cover_is_closed
-
-    @property
-    def current_cover_position(self) -> int | None:
-        return self._device.cover_position
-
-    async def async_added_to_hass(self) -> None:
-        self._device.add_state_listener(self._state_changed)
-
-    async def async_will_remove_from_hass(self) -> None:
-        self._device.remove_state_listener(self._state_changed)
-
-    async def async_open_cover(self, **kwargs: Any) -> None:
-        del kwargs
-        await self._device.async_open_cover()
-
-    async def async_close_cover(self, **kwargs: Any) -> None:
-        del kwargs
-        await self._device.async_close_cover()
-
-    async def async_stop_cover(self, **kwargs: Any) -> None:
-        del kwargs
-        await self._device.async_stop_cover()
-
-    async def async_set_cover_position(self, **kwargs: Any) -> None:
-        position = kwargs.get(ATTR_POSITION)
-        if position is None:
-            raise ValueError("cover position is required")
-        await self._device.async_set_cover_position(position)
-
-    def _state_changed(self) -> None:
-        self.async_write_ha_state()
+    def current_cover_position(self): return self._state_value("current_position")
+    async def async_open_cover(self, **kwargs: Any) -> None: await self._run_action("open", kwargs)
+    async def async_close_cover(self, **kwargs: Any) -> None: await self._run_action("close", kwargs)
+    async def async_stop_cover(self, **kwargs: Any) -> None: await self._run_action("stop", kwargs)
+    async def async_set_cover_position(self, **kwargs: Any) -> None: await self._run_action("set_position", kwargs)

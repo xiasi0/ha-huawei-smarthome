@@ -1,103 +1,39 @@
-"""Home Assistant humidifier projection for Profile-backed devices."""
+"""Generic Home Assistant humidifier registration for product adapters."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.humidifier import (
-    HumidifierEntity,
-    HumidifierEntityFeature,
-)
+from homeassistant.components.humidifier import HumidifierEntity, HumidifierEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .device_registry import device_identifier, profile_configuration_url
+from .entity_helpers import AdapterEntityMixin, iter_specs
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Create humidifiers from Profile-backed runtime compositions."""
-
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     del hass
-    client = entry.runtime_data
-    async_add_entities(
-        HuaweiSmartHomeHumidifier(device)
-        for device in client.hwiot_devices.values()
-        if "humidifier" in device.ha_platforms
-    )
+    async_add_entities(HuaweiAdapterHumidifier(context, spec) for context, spec in iter_specs(entry.runtime_data, "humidifier"))
 
 
-class HuaweiSmartHomeHumidifier(HumidifierEntity):
-    """Project one Profile-backed humidifier."""
-
-    def __init__(self, device: Any) -> None:
-        self._device = device
-        self._attr_unique_id = f"{device.home_id}_{device.dev_id}_humidifier"
-        self._attr_name = device.product_name
-        self._attr_has_entity_name = True
-        self._attr_should_poll = False
-        self._attr_supported_features = HumidifierEntityFeature.MODES if device.humidifier_modes else HumidifierEntityFeature(0)
-        self._attr_available_modes = list(device.humidifier_modes)
-        if device.min_target_humidity is not None:
-            self._attr_min_humidity = device.min_target_humidity
-        if device.max_target_humidity is not None:
-            self._attr_max_humidity = device.max_target_humidity
+class HuaweiAdapterHumidifier(AdapterEntityMixin, HumidifierEntity):
+    def __init__(self, context: Any, spec: Any) -> None:
+        self._init_adapter_entity(context, spec)
+        self._attr_supported_features = HumidifierEntityFeature.MODES if spec.metadata.get("modes") else HumidifierEntityFeature(0)
+        self._attr_min_humidity = spec.metadata.get("min_humidity", 0)
+        self._attr_max_humidity = spec.metadata.get("max_humidity", 100)
+        self._attr_available_modes = list(spec.metadata.get("modes", ()))
 
     @property
-    def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={device_identifier(self._device.descriptor)},
-            name=self._device.name,
-            manufacturer=self._device.manufacturer,
-            model=self._device.model,
-            sw_version=self._device.firmware_version,
-            configuration_url=profile_configuration_url(self._device.prod_id),
-        )
-
+    def is_on(self): return self._state_value("is_on")
     @property
-    def available(self) -> bool:
-        return self._device.available
-
+    def current_humidity(self): return self._state_value("current_humidity")
     @property
-    def is_on(self) -> bool | None:
-        return self._device.humidifier_is_on
-
+    def target_humidity(self): return self._state_value("target_humidity")
     @property
-    def current_humidity(self) -> int | None:
-        return self._device.current_humidity
-
-    @property
-    def target_humidity(self) -> int | None:
-        return self._device.target_humidity
-
-    @property
-    def mode(self) -> str | None:
-        return self._device.humidifier_mode
-
-    async def async_added_to_hass(self) -> None:
-        self._device.add_state_listener(self._state_changed)
-
-    async def async_will_remove_from_hass(self) -> None:
-        self._device.remove_state_listener(self._state_changed)
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        del kwargs
-        await self._device.async_humidifier_turn_on()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        del kwargs
-        await self._device.async_humidifier_turn_off()
-
-    async def async_set_humidity(self, humidity: int) -> None:
-        await self._device.async_set_humidity(humidity)
-
-    async def async_set_mode(self, mode: str) -> None:
-        await self._device.async_set_humidifier_mode(mode)
-
-    def _state_changed(self) -> None:
-        self.async_write_ha_state()
+    def mode(self): return self._state_value("mode")
+    async def async_turn_on(self): await self._run_action("turn_on", {})
+    async def async_turn_off(self): await self._run_action("turn_off", {})
+    async def async_set_humidity(self, humidity: int): await self._run_action("set_humidity", {"humidity": humidity})
+    async def async_set_mode(self, mode: str): await self._run_action("set_mode", {"mode": mode})

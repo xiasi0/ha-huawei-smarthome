@@ -44,16 +44,18 @@ OBSERVED_MQTT_SUBSCRIPTION_QOS = 2
 OBSERVED_MQTT_FILTER = "/smartHome/signaltrans/v2/categories/command"
 PLATFORMS = (
     "light",
-    "cover",
     "switch",
     "sensor",
-    "fan",
-    "humidifier",
-    "binary_sensor",
-    "event",
-    "number",
     "select",
+    "number",
+    "fan",
+    "binary_sensor",
+    "button",
+    "climate",
+    "cover",
+    "event",
+    "humidifier",
+    "lock",
     "media_player",
 )
-
 UNASSIGNED_HOME_ID = "__unassigned__"
