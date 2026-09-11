@@ -32,9 +32,11 @@ from .domain.models import (
 )
 from .errors import ReauthenticationRequired
 from .device_registry import device_identifier_value
+from .device_adapters.api import HuaweiProductAdapter
+from .device_adapters.context import DeviceContext
 from .mqtt_client import HuaweiMqttClient
 from .storage.credentials import CredentialBindingError
-from .storage.profile_metadata import ProductProfileStore
+from .storage.profile_metadata import ProfileStore
 from .storage.state import AccountStateStore
 from .sync_coordinator import SmartHomeSyncCoordinator
 
@@ -79,7 +81,8 @@ class HuaweiSmartHomeClient:
         credential_store: CredentialStore,
         state_store: AccountStateStore,
         api: SmartHomeDiscoveryApi,
-        profile_store: ProductProfileStore | None = None,
+        profile_store: ProfileStore | None = None,
+        adapters: Mapping[str, HuaweiProductAdapter] | None = None,
         mqtt: HuaweiMqttClient | None = None,
         mqtt_enabled: bool = True,
         reconnect_min: float = 5.0,
@@ -95,6 +98,10 @@ class HuaweiSmartHomeClient:
         self.state_store = state_store
         self.api = api
         self.profile_store = profile_store
+        self._adapters = {
+            key.casefold(): adapter
+            for key, adapter in (adapters or {}).items()
+        }
         self.selected_home_ids = selected_home_ids or None
         self.mqtt_enabled = mqtt_enabled
         self.mqtt = mqtt or HuaweiMqttClient(
@@ -110,6 +117,7 @@ class HuaweiSmartHomeClient:
         self._reconnect_task: asyncio.Task[None] | None = None
         self._operation_lock = asyncio.Lock()
         self._profiles: dict[str, Mapping[str, object]] = {}
+        self._protocol_devices: dict[tuple[str, str], DeviceContext] = {}
         self._reconnect_min = reconnect_min
         self._reconnect_max = reconnect_max
         self._started = False
@@ -141,6 +149,12 @@ class HuaweiSmartHomeClient:
         """Return raw persisted Product Profiles keyed by product ID."""
 
         return self._profiles
+
+    @property
+    def protocol_devices(self) -> Mapping[tuple[str, str], DeviceContext]:
+        """Return raw contexts exposed to adapters and generic HA entities."""
+
+        return self._protocol_devices
 
     async def async_start(self) -> None:
         """Restore the account, discover devices and start MQTT."""
@@ -219,6 +233,11 @@ class HuaweiSmartHomeClient:
         self._excluded_device_ids = self._excluded_device_ids | {
             device_identifier,
         }
+        for key, context in tuple(self._protocol_devices.items()):
+            if device_identifier_value(context.descriptor) != device_identifier:
+                continue
+            context.close()
+            self._protocol_devices.pop(key, None)
 
     async def async_stop(self) -> None:
         """Stop MQTT and the account session."""
@@ -229,6 +248,9 @@ class HuaweiSmartHomeClient:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        for context in self._protocol_devices.values():
+            context.close()
+        self._protocol_devices.clear()
         await self.mqtt.async_stop()
         if self.session_manager is not None:
             await self.session_manager.async_stop()
@@ -249,6 +271,7 @@ class HuaweiSmartHomeClient:
             raise RuntimeError("Huawei SmartHome snapshot contains duplicate devices")
         self.state.homes = {home.home_id: home for home in snapshot.homes}
         self.state.devices = devices
+        self._sync_protocol_devices()
         self.state.device_home_index = _device_home_index(snapshot)
         try:
             await self._refresh_dynamic_states(
@@ -532,6 +555,15 @@ class HuaweiSmartHomeClient:
             if merged != descriptor:
                 self.state.devices[key] = merged
                 changed = True
+            context = self._protocol_devices.get(key)
+            if context is None:
+                continue
+            context.apply_state_snapshot(state.services, online=state.online)
+            context.update(
+                merged,
+                self._profile_for_device(merged),
+                self._adapter_for_device(merged),
+            )
         return changed
 
     async def _discover_with_token_recovery(
@@ -687,6 +719,50 @@ class HuaweiSmartHomeClient:
         self.state.last_event_at = datetime.now(timezone.utc)
         if self._started and self._sync.is_topology_event(payload):
             self._sync.schedule_full_sync("mqtt_topology_event")
+        for context in tuple(self._protocol_devices.values()):
+            context.handle_mqtt_message(payload)
+
+    def _profile_for_device(
+        self,
+        descriptor: RemoteDeviceDescriptor,
+    ) -> Mapping[str, object] | None:
+        if not isinstance(descriptor.prod_id, str):
+            return None
+        return self._profiles.get(descriptor.prod_id.strip().casefold())
+
+    def _adapter_for_device(
+        self,
+        descriptor: RemoteDeviceDescriptor,
+    ) -> HuaweiProductAdapter | None:
+        if not isinstance(descriptor.prod_id, str):
+            return None
+        return self._adapters.get(descriptor.prod_id.strip().casefold())
+
+    def _sync_protocol_devices(self) -> None:
+        current: dict[tuple[str, str], DeviceContext] = {}
+        for descriptor in self.state.devices.values():
+            if (descriptor.node_type or "").strip().upper() == "GROUP":
+                continue
+            if self._is_excluded_device(descriptor):
+                continue
+            key = descriptor.key
+            context = self._protocol_devices.get(key)
+            profile = self._profile_for_device(descriptor)
+            adapter = self._adapter_for_device(descriptor)
+            if context is None:
+                context = DeviceContext(
+                    descriptor,
+                    profile,
+                    self.mqtt,
+                    adapter,
+                )
+            else:
+                context.update(descriptor, profile, adapter)
+            current[key] = context
+        for key, context in self._protocol_devices.items():
+            if key not in current:
+                context.close()
+        self._protocol_devices = current
     def _is_excluded_device(self, descriptor: RemoteDeviceDescriptor) -> bool:
         """Return whether a remote device is excluded from HA projection."""
 

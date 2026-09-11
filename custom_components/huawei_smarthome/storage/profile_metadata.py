@@ -16,8 +16,8 @@ PROFILE_STORAGE_PREFIX = "huawei_smarthome/profiles"
 _LOGGER = logging.getLogger(__name__)
 
 
-class ProductProfileStore(Protocol):
-    """Load normalized public Profiles keyed by product ID."""
+class ProfileStore(Protocol):
+    """Load raw public Profiles keyed by product ID."""
 
     async def async_get_profiles(
         self,
@@ -46,8 +46,8 @@ def profile_storage_key(prod_id: str) -> str:
     return f"{PROFILE_STORAGE_PREFIX}/{prod_id}.json"
 
 
-class HomeAssistantProductProfileStore:
-    """Persist and fetch one public Profile per product ID."""
+class HomeAssistantProfileStore:
+    """Persist and fetch one raw public Profile per product ID."""
 
     def __init__(
         self,

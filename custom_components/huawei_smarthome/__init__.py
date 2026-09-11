@@ -5,7 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import TYPE_CHECKING
 
-from .const import CONF_ACCOUNT, CONF_SELECTED_HOME_IDS, DOMAIN
+from .const import CONF_ACCOUNT, CONF_SELECTED_HOME_IDS, DOMAIN, PLATFORMS
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -31,6 +31,7 @@ async def async_setup_entry(
 
     from .api.client import SmartHomeDiscoveryApi
     from .api.transport import AiohttpHttpTransport
+    from .device_adapters.loader import load_product_adapters
     client_module = await hass.async_add_executor_job(
         import_module,
         ".client",
@@ -40,10 +41,11 @@ async def async_setup_entry(
     from .device_registry import register_devices
     from .errors import ReauthenticationRequired
     from .storage.credentials import HomeAssistantCredentialStore
-    from .storage.profile_metadata import HomeAssistantProductProfileStore
+    from .storage.profile_metadata import HomeAssistantProfileStore
     from .storage.state import HomeAssistantAccountStateStore
 
     session = async_get_clientsession(hass)
+    adapters = await hass.async_add_executor_job(load_product_adapters)
     selected_home_ids = entry.options.get(
         CONF_SELECTED_HOME_IDS,
         entry.data.get(CONF_SELECTED_HOME_IDS, []),
@@ -64,7 +66,8 @@ async def async_setup_entry(
         credential_store=HomeAssistantCredentialStore(hass),
         state_store=HomeAssistantAccountStateStore(hass, entry.entry_id),
         api=smart_home_api,
-        profile_store=HomeAssistantProductProfileStore(hass, session),
+        profile_store=HomeAssistantProfileStore(hass, session),
+        adapters=adapters,
     )
     account = entry.data.get(CONF_ACCOUNT)
     if isinstance(account, str) and account.strip() and entry.title != account.strip():
@@ -92,6 +95,7 @@ async def async_setup_entry(
         client.devices.values(),
         excluded_device_ids=client.excluded_device_ids,
     )
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
@@ -101,6 +105,9 @@ async def async_unload_entry(
 ) -> bool:
     """Unload one Huawei SmartHome account."""
 
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not unload_ok:
+        return False
     await entry.runtime_data.async_stop()
     return True
 
