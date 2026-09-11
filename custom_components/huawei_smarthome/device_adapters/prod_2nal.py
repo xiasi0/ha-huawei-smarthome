@@ -15,6 +15,7 @@ Exposed entities (every command payload below is copied from a real
                       / ``fan.gear`` (1..6 档, mapped to HA 1..100 %)
 * ``select`` "灯光模式"  <- ``lightMode.mode``   (会客/观影/用餐/浪漫/睡眠/阅读)
 * ``select`` "风扇模式"  <- ``fanMode.mode``     (空/睡眠风/自然风/循环风)
+* ``select`` "风量档位"  <- ``fan.gear``         (空/1档..6档, Profile enumList)
 * ``switch`` "风扇反转"  <- ``verticalswing.verticalswing`` (H5 label 风扇反转)
 * ``number`` "渐变时间"  <- ``progressSwitchHF.progressSwitch`` (0..59 s)
 
@@ -32,6 +33,15 @@ Fan gear to percentage mapping: the device has 6 discrete speeds, mapped to
 back to the nearest gear (1..6).  The fan's ``percentage_step`` metadata is
 declared as 16, the closest integer below 100/6, because the integration's
 fan platform stores the step as an int.
+
+The fan gear is also exposed as a dedicated "风量档位" select so the discrete
+gears can be picked by name, not only through the percentage slider.  The
+labels (空/1档..6档) come from the Profile enumList; value 0 ("空") is the
+placeholder reported by the device and stays in the options.  The H5
+FanSpeedCard.selectMode dispatches exactly ``{fan:{gear:e}}`` — no switchFan
+power toggle is included — so the select sends the same payload.  The H5 row
+is disabled while the fan is off; that is a UI shortcut gate, not a protocol
+limit, and persistent entities do not replicate it.
 
 ``fanMode.mode`` value 0 ("空") is a placeholder and stays in the select
 options, otherwise the entity cannot render the state when the device reports
@@ -95,6 +105,16 @@ _FAN_SWITCH_FIELD = "on"
 _FAN_SID = "fan"
 _FAN_GEAR_FIELD = "gear"
 _FAN_GEAR_MAX = 6
+# Labels from the Profile enumList; 0 ("空") is the placeholder and stays.
+_FAN_GEAR_OPTIONS = (
+    (0, "空"),
+    (1, "1档"),
+    (2, "2档"),
+    (3, "3档"),
+    (4, "4档"),
+    (5, "5档"),
+    (6, "6档"),
+)
 _FAN_MODE_SID = "fanMode"
 _FAN_MODE_FIELD = "mode"
 # Value 0 ("空") is a placeholder reported by the device and stays listed.
@@ -348,6 +368,15 @@ async def _fan_set_percentage(context: DeviceContext, data: Mapping[str, Any]) -
     )
 
 
+async def _fan_gear_select_option(
+    context: DeviceContext,
+    data: Mapping[str, Any],
+) -> None:
+    # H5 FanSpeedCard.selectMode sends {fan:{gear:e}} only — no power toggle.
+    value = _enum_value(data.get("option"), _FAN_GEAR_OPTIONS)
+    await context.async_send_service(_FAN_SID, {_FAN_GEAR_FIELD: value})
+
+
 async def _fan_mode_select_option(
     context: DeviceContext,
     data: Mapping[str, Any],
@@ -468,6 +497,31 @@ class Product2nalAdapter:
                         "turn_off": _fan_turn_off,
                         "set_percentage": _fan_set_percentage,
                     },
+                )
+            )
+
+        # --- fan gear select ----------------------------------------------
+        if context.has_service(_FAN_SID) and _field(
+            profile, _FAN_SID, _FAN_GEAR_FIELD
+        ) is not None:
+            def fan_gear_state(device: DeviceContext) -> Mapping[str, Any]:
+                return {
+                    "current_option": _enum_label(
+                        device.value(_FAN_SID, _FAN_GEAR_FIELD),
+                        _FAN_GEAR_OPTIONS,
+                    )
+                }
+
+            specs.append(
+                EntitySpec(
+                    platform="select",
+                    key="fan_gear",
+                    name="风量档位",
+                    state=fan_gear_state,
+                    metadata={
+                        "options": [label for _, label in _FAN_GEAR_OPTIONS]
+                    },
+                    actions={"select_option": _fan_gear_select_option},
                 )
             )
 
