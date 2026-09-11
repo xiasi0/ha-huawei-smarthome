@@ -19,6 +19,18 @@ Exposed entities:
 * ``switch``        "传感器检测"         <- ``switch.on``
 * ``switch``        "电源开关"           <- ``switch.reportSwitch``
 * ``switch``        "LED指示灯"          <- ``backlight.on``
+* ``select``        "灵敏度"             <- ``basicFence.sensitivity``
+                                          (高 2 / 中 3 / 低 4，H5
+                                          ``chooseSensitivity``；未配置 1 /
+                                          无效 0 保留在选项里兜底)
+* ``select``        "人员定位"           <- ``basicFence.singleReport``
+                                          (关 0 / 持续开启 1 / 开启三分钟 2，
+                                          H5 首页 personPosition 单元格与
+                                          安装/编辑页；提示文案与 Profile
+                                          枚举互证)
+* ``number``        "可感应最小目标高度" <- ``basicFence.filteringHeight``
+                                          (0-70 cm，H5 ``setMinHeight``，
+                                          行标签 min_height)
 * ``button``        "重置无人状态"       <- ``action.action`` = 1
 * ``button``        "重启设备"           <- ``reboot.action`` = 0 (Wi-Fi 接入时)
 
@@ -28,6 +40,28 @@ Field semantics were verified against the Profile, the vendor H5 page
 暗光/弱光/适中/较强/强/很强; its region helper resolves ``fenceId`` 0 to
 ``basicFenceEvent`` and 1..6 to ``userFenceEvent1..6``.  Illuminance
 201 lx / level 适中 was confirmed on hardware.
+
+Deliberately *not* exposed (re-verified against the vendor bundle):
+
+* ``luminance.threshold`` (RW 50-200) — the only ``threshold`` hits in the
+  bundle belong to the bundled scroll library; the vendor UI never reads or
+  writes the field, so its semantics have no second source.
+* ``faultDetection.status`` / ``code`` — zero references in the bundle.
+* ``basicFence.enableFence`` / ``standingExistentEnable`` /
+  ``userFenceN.enableFence`` etc. — written only by the install wizard as
+  part of a whole-fence configuration blob ({sensitivity: t, enableFence: 1}),
+  never as a standalone toggle.
+* ``devLocation`` — installation geometry (azimuth/height/坐标) maintained by
+  the install wizard through composite strings (``installCoord``) that the
+  Profile does not even declare.
+* ``basicFenceEvent.standingExistent`` / ``across`` / ``nonBedStatus`` /
+  ``acrossFence`` and ``postionTag`` / ``postionList`` — event details that
+  only appear in the bundle's default-state blob and the App native history
+  page's image map, never in live H5 UI.
+* ``update`` / ``netInfo`` — OTA and read-only diagnostics, consistent with
+  the other adapters.
+* ``action`` values other than 1 (恢复出厂 / 擦除配置 / 解除绑定) are
+  destructive and are not offered as buttons.
 
 Presence is reported exactly as the device sends it: no local de-bounce and no
 occupancy hold time is applied, so ``existent`` may flap on brief
@@ -181,6 +215,32 @@ _ACCESS_MODE_WIFI_HUB = "WiFi中枢接入"
 _ACCESS_MODE_WIFI_DIRECT = "WiFi直连接入"
 _WIFI_PROTOCOL_TYPE = "1"
 _PLC_PROTOCOL_TYPES = frozenset({"5", "11"})
+
+# 灵敏度.  The vendor picker (``chooseSensitivity``) offers 高/中/低 =
+# 2/3/4 (matching the Profile enumList) and dispatches
+# ``{basicFence: {sensitivity: value}}``.  The two placeholder values stay
+# in the option list so a device reporting them still resolves to a label.
+_SENSITIVITY_FIELD = "sensitivity"
+_SENSITIVITY_OPTIONS = (
+    (2, "高"),
+    (3, "中"),
+    (4, "低"),
+    (1, "未配置"),
+    (0, "无效/不支持"),
+)
+
+# 人员定位.  The home cell (personPosition 人员定位) toggles
+# ``{basicFence: {singleReport: on ? 0 : 2}}`` and its tip reads
+# 开启后，区域图内将展示人的位置（配置区域时自动开启）；再次点击即可
+# 关闭，或 3分钟后自动关闭, matching the Profile enum 0 关 / 1 持续开 /
+# 2 持续打开三分钟; the install/edit pages send 0/1/2 directly.
+_PERSON_POSITION_FIELD = "singleReport"
+_PERSON_POSITION_OPTIONS = ((0, "关"), (1, "持续开启"), (2, "开启三分钟"))
+
+# 可感应最小目标高度.  ``setMinHeight`` dispatches
+# ``{basicFence: {filteringHeight: t}}`` and the row label is
+# min_height 可感应最小目标高度 (cm); the Profile range is 0..70.
+_MIN_HEIGHT_FIELD = "filteringHeight"
 
 
 def _service(profile: Mapping[str, Any], sid: str) -> Mapping[str, Any] | None:
@@ -457,6 +517,81 @@ def _uses_wifi(context: DeviceContext) -> bool:
     return _text(context.descriptor.protocol_type) == _WIFI_PROTOCOL_TYPE
 
 
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _enum_select(
+    profile: Mapping[str, Any],
+    sid: str,
+    field: str,
+    key: str,
+    name: str,
+    options: tuple[tuple[int, str], ...],
+) -> EntitySpec | None:
+    """Build a ``select`` over one enum characteristic.
+
+    ``options`` is the full value/label table, placeholders included, so a
+    reported placeholder still resolves to its label.  Unknown values map to
+    unknown instead of an invented option.
+    """
+
+    if _field(profile, sid, field) is None:
+        return None
+    labels = {value: label for value, label in options}
+    values = {label: value for value, label in options}
+
+    def state(context: DeviceContext) -> Mapping[str, Any]:
+        number = _number(context.value(sid, field))
+        if number is None:
+            return {"current_option": None}
+        return {"current_option": labels.get(int(number))}
+
+    async def action(context: DeviceContext, data: Mapping[str, Any]) -> None:
+        option = data["option"]
+        if option not in values:
+            raise ValueError(f"{key}: unknown option {option!r}")
+        await context.async_send_service(sid, {field: values[option]})
+
+    return EntitySpec(
+        platform="select",
+        key=key,
+        name=name,
+        state=state,
+        metadata={"options": [label for _, label in options]},
+        actions={"select_option": action},
+    )
+
+
+def _min_height_number(profile: Mapping[str, Any]) -> EntitySpec | None:
+    """可感应最小目标高度 (``basicFence.filteringHeight``, cm)."""
+
+    if _field(profile, _BASIC_FENCE_SID, _MIN_HEIGHT_FIELD) is None:
+        return None
+
+    def state(context: DeviceContext) -> Mapping[str, Any]:
+        value = _number(context.value(_BASIC_FENCE_SID, _MIN_HEIGHT_FIELD))
+        if value is None:
+            return {"native_value": None}
+        return {"native_value": _clamp(value, 0, 70)}
+
+    async def action(context: DeviceContext, data: Mapping[str, Any]) -> None:
+        value = _clamp(float(data["value"]), 0, 70)
+        await context.async_send_service(
+            _BASIC_FENCE_SID,
+            {_MIN_HEIGHT_FIELD: round(value)},
+        )
+
+    return EntitySpec(
+        platform="number",
+        key="min_detectable_height",
+        name="可感应最小目标高度",
+        state=state,
+        metadata={"min": 0, "max": 70, "step": 1, "unit": "cm"},
+        actions={"set_value": action},
+    )
+
+
 class ProductZg1yAdapter:
     """Keep all ZG1Y entity choices in this file."""
 
@@ -516,6 +651,33 @@ class ProductZg1yAdapter:
 
         entities.extend(self._presence_entities(context))
         entities.extend(self._switch_entities(context, profile))
+
+        # Config features on the basicFence service, each verified against a
+        # vendor dispatch: 灵敏度 (chooseSensitivity), 人员定位
+        # (personPosition cell toggle / install pages), 可感应最小目标高度
+        # (setMinHeight).
+        if context.has_service(_BASIC_FENCE_SID):
+            for spec in (
+                _enum_select(
+                    profile,
+                    _BASIC_FENCE_SID,
+                    _SENSITIVITY_FIELD,
+                    "sensitivity",
+                    "灵敏度",
+                    _SENSITIVITY_OPTIONS,
+                ),
+                _enum_select(
+                    profile,
+                    _BASIC_FENCE_SID,
+                    _PERSON_POSITION_FIELD,
+                    "person_position",
+                    "人员定位",
+                    _PERSON_POSITION_OPTIONS,
+                ),
+                _min_height_number(profile),
+            ):
+                if spec is not None:
+                    entities.append(spec)
 
         if context.has_service(_ACTION_SID):
             entities.append(
