@@ -276,6 +276,86 @@ def _alarm_sensor_spec(
     )
 
 
+# The alarm fields this adapter reports, mapped to the event type each one
+# fires.  Home Assistant event types must be stable snake_case tokens.
+_ALARM_EVENTS: tuple[tuple[str, str], ...] = (
+    ("humanBodyAlarm", "human_body"),
+    ("audioAlarm", "audio"),
+    ("videoAlarm", "video"),
+    ("babyCryAlarm", "baby_cry"),
+)
+
+# ``alarmId`` arrives as "<camera id>::<epoch ms>"; the epoch is what actually
+# distinguishes one detection from the next, and the camera id is constant, so
+# the timestamp half is the stable part of the identifier.
+_ALARM_ID_SEPARATOR = "::"
+
+
+def _alarm_event_decoder(
+    device: DeviceContext,
+    sid: str,
+    data: Mapping[str, Any],
+    timestamp: str | None,
+) -> list[tuple[str, Mapping[str, Any]]]:
+    """Turn one ``alarmEvent`` push into Home Assistant events.
+
+    ``alarmEvent`` is a one-shot signal: the cloud pushes it when something is
+    detected and never sends the cleared value.  The sensors declared beside
+    this decoder therefore only describe *what was last reported* and cannot
+    drive an automation that should run on every detection -- a later
+    detection that sets the same field produces no state change at all.
+
+    This decoder supplies the missing half: each accepted push is reported as
+    an event, so an automation can trigger on every occurrence and read
+    ``alarm_id`` to tell them apart.
+    """
+
+    if sid != _ALARM_SID:
+        return []
+
+    alarm_id = data.get("alarmId")
+    alarm_ref = str(alarm_id) if alarm_id is not None else None
+    detected_at = None
+    if isinstance(alarm_id, str) and _ALARM_ID_SEPARATOR in alarm_id:
+        detected_at = alarm_id.rsplit(_ALARM_ID_SEPARATOR, 1)[-1] or None
+
+    events: list[tuple[str, Mapping[str, Any]]] = []
+    for field_name, event_type in _ALARM_EVENTS:
+        # Any field the Profile declares as ``0/1`` may arrive as a bool, an int
+        # or a numeric string, so ``_bool`` is used rather than a truthiness
+        # test that would treat the string "0" as raised.
+        if _bool(data.get(field_name)) is not True:
+            continue
+        # A single push can carry several raised fields (a camera reports
+        # audio and video together), so every raised one is reported; the
+        # shared alarm id keeps them recognisable as one occurrence.
+        events.append(
+            (
+                event_type,
+                {
+                    "alarm_id": alarm_ref,
+                    "detected_at": detected_at,
+                    "received_at": timestamp,
+                    "camera": device.name,
+                },
+            )
+        )
+    return events
+
+
+def _alarm_event_spec() -> EntitySpec:
+    """One event entity that fires for every reported detection."""
+
+    return EntitySpec(
+        platform="event",
+        key="alarm",
+        name="告警事件",
+        state=lambda device: {},
+        metadata={"event_types": [event_type for _, event_type in _ALARM_EVENTS]},
+        event_decoder=_alarm_event_decoder,
+    )
+
+
 def _online_spec() -> EntitySpec:
     """One connectivity sensor backed by the device's online flag."""
 
@@ -318,10 +398,11 @@ class Product2G4NAdapter:
                 entities.append(shoot)
 
         if _has_service(profile, _ALARM_SID):
-            # Reported as sensors, not binary_sensors: the cloud pushes an
-            # alarm once and never sends the cleared value, so a
-            # binary_sensor would stay on forever after the first detection
-            # and could never trigger again.
+            # The sensors describe the last reported alarm state -- they cannot
+            # be binary_sensors (the cloud never sends the cleared value, so a
+            # binary_sensor would latch on after the first detection and never
+            # change again) and they cannot drive an automation that must run on
+            # every detection, because a repeated detection changes nothing.
             entities.append(
                 _alarm_sensor_spec(profile, "humanBodyAlarm", "人形检测")
             )
@@ -334,6 +415,9 @@ class Product2G4NAdapter:
             entities.append(
                 _alarm_sensor_spec(profile, "babyCryAlarm", "婴儿哭声")
             )
+            # The event entity supplies that missing half: it fires on every
+            # accepted alarmEvent push, so automations trigger per detection.
+            entities.append(_alarm_event_spec())
         if _has_service(profile, _VOIP_SID):
             entities.append(_binary_sensor_spec(_VOIP_SID, "calling", "呼叫中"))
             # voip.voipCall (RW) triggers a video call to the phone app; the
