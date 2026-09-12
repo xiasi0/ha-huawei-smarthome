@@ -39,10 +39,18 @@ class HuaweiAdapterLight(LightEntity):
         self._attr_name = spec.name or context.name
         self._attr_has_entity_name = True
         self._attr_should_poll = False
-        modes = metadata.get("supported_color_modes", {"onoff"})
-        self._attr_supported_color_modes = {
-            ColorMode(mode) for mode in modes
+        modes = {
+            ColorMode(mode) for mode in metadata.get("supported_color_modes", {"onoff"})
         }
+        # HA >= 2024.7 rejects supported_color_modes that combine ONOFF or
+        # BRIGHTNESS with real color modes ("sets invalid supported color
+        # modes"); both are implied by any other color mode, so drop them.
+        advanced = modes - {ColorMode.ONOFF, ColorMode.BRIGHTNESS, ColorMode.WHITE}
+        if advanced:
+            modes = advanced | (modes & {ColorMode.WHITE})
+        elif not modes:
+            modes = {ColorMode.ONOFF}
+        self._attr_supported_color_modes = modes
         if metadata.get("min_color_temp_kelvin") is not None:
             self._attr_min_color_temp_kelvin = int(
                 metadata["min_color_temp_kelvin"]
