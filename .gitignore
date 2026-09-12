@@ -8,5 +8,4 @@ dist/
 build/
 *.egg-info/
 tests/
-docs/
 
