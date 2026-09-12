@@ -166,7 +166,16 @@ class HomeAssistantProfileStore:
                     type(error).__name__,
                 )
                 return None
-            await store.async_save({"profile": payload})
+            try:
+                await store.async_save({"profile": payload})
+            except Exception as error:  # noqa: BLE001 - report persistence failure
+                _LOGGER.error(
+                    "Huawei SmartHome Profile persistence failed: "
+                    "prod_id=%s error=%s",
+                    prod_id,
+                    type(error).__name__,
+                )
+                raise
             return profile
 
 
