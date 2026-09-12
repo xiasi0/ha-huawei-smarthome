@@ -23,6 +23,12 @@
 
 未提供适配器的产品不会创建实体，这是避免错误状态映射和控制命令的设计选择。
 
+当前已接入的产品清单见[已接入设备](docs/supported-devices.md)。该清单以仓库中实际存在的 `prod_<prodId>.py` 适配器为准。
+
+## 已接入设备
+
+设备名称、厂商和设备类型来自华为全量 IoT 资料目录。查看当前已接入的产品列表，请参阅[已接入设备清单](docs/supported-devices.md)。
+
 ## 快速上手
 
 ### 1. 安装
@@ -76,11 +82,11 @@ https://github.com/xiasi0/ha-huawei-smarthome
 
 ### 4. 查看实体
 
-配置完成后，在 Huawei SmartHome 设备页面查看已创建的实体。实体由设备的产品适配器决定；没有适配器的产品不会显示实体。
+配置完成后，在 Huawei SmartHome 设备页面查看已创建的实体。实体由设备的产品适配器决定；没有适配器的产品不会显示实体。当前支持范围请以[已接入设备清单](docs/supported-devices.md)为准。
 
 ## 产品适配器贡献
 
-欢迎拥有实际设备的用户贡献适配器。每个产品的适配器位于：
+欢迎拥有实际设备的用户贡献适配器。提交前请先检查[已接入设备清单](docs/supported-devices.md)，确认该 `prodId` 尚未接入。每个产品的适配器位于：
 
 ```text
 custom_components/huawei_smarthome/device_adapters/prod_<产品ID>.py
@@ -92,8 +98,9 @@ custom_components/huawei_smarthome/device_adapters/prod_<产品ID>.py
 - 根据该设备 Profile 中的字段范围、枚举值和单位进行转换，不要复用未经验证的其他产品规则。
 - 提交对应测试，覆盖已验证的读取和写入行为。
 - 不要提交账号、令牌、设备序列号、完整 Profile、日志或其他敏感数据。
+- 新增或修改适配器后，同步更新[已接入设备清单](docs/supported-devices.md)。
 
-适配器通过 `EntitySpec` 声明实体及其状态、属性和操作；可参考已验证的 `prod_100z.py` 实现。
+适配器通过 `EntitySpec` 声明实体及其状态、属性和操作；可参考已接入清单中的 `prod_100z.py` 实现。
 
 ## 数据与隐私
 
