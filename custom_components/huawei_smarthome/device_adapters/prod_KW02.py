@@ -558,6 +558,15 @@ class ProductKW02Adapter:
 #   lastActionTime   time is the last time the lock was operated.
 # ---------------------------------------------------------------------------
 
+_UPDATE_SID = "update"
+_USERS_SID = "users"
+_FACES_SID = "faces"
+_FINGERS_SID = "fingers"
+_KEY_OPERATE_SID = "keyOperate"
+_DOOR_EVENT_SID = "doorEvent"
+_LAST_ACTION_SID = "lastActionTime"
+
+
 def _firmware_specs(context: DeviceContext) -> list[EntitySpec]:
     """Firmware version of the lock body.
 
@@ -636,54 +645,51 @@ def _roster_specs(context: DeviceContext) -> list[EntitySpec]:
 
 
 def _reader_based_specs(context: DeviceContext) -> list[EntitySpec]:
-    """Last-operated metadata reported as plain text."""
+    """Last-operated metadata reported as plain text.
 
-    specs: list[EntitySpec] = []
+    These services are event-driven: the lock pushes keyOperate, doorEvent and
+    lastActionTime only when something happens, so none of them appears in the
+    discovery snapshot and ``has_service`` is false for them at setup time.
+    They are therefore always registered and simply report unknown until the
+    first event arrives.
+    """
 
-    if context.has_service(_KEY_OPERATE_SID):
-        def key_name(device: DeviceContext) -> Mapping[str, Any]:
-            value = device.value(_KEY_OPERATE_SID, "keyName")
-            return {"native_value": value if isinstance(value, str) and value else None}
+    def key_name(device: DeviceContext) -> Mapping[str, Any]:
+        value = device.value(_KEY_OPERATE_SID, "keyName")
+        return {"native_value": value if isinstance(value, str) and value else None}
 
-        specs.append(
-            EntitySpec(
-                platform="sensor",
-                key="last_key",
-                name="最近使用钥匙",
-                state=key_name,
-            )
-        )
-    if context.has_service(_DOOR_EVENT_SID):
-        def door_user(device: DeviceContext) -> Mapping[str, Any]:
-            value = device.value(_DOOR_EVENT_SID, "userName")
-            return {"native_value": value if isinstance(value, str) and value else None}
+    def door_user(device: DeviceContext) -> Mapping[str, Any]:
+        value = device.value(_DOOR_EVENT_SID, "userName")
+        return {"native_value": value if isinstance(value, str) and value else None}
 
-        specs.append(
-            EntitySpec(
-                platform="sensor",
-                key="door_event_user",
-                name="最近门事件人员",
-                state=door_user,
-            )
-        )
-    if context.has_service(_LAST_ACTION_SID):
-        def last_action(device: DeviceContext) -> Mapping[str, Any]:
-            value = device.value(_LAST_ACTION_SID, "time")
-            return {"native_value": value if isinstance(value, str) and value else None}
+    def last_action(device: DeviceContext) -> Mapping[str, Any]:
+        value = device.value(_LAST_ACTION_SID, "time")
+        return {"native_value": value if isinstance(value, str) and value else None}
 
-        specs.append(
-            EntitySpec(
-                platform="sensor",
-                key="last_action_time",
-                name="最近操作时间",
-                state=last_action,
-                # The lock reports SmartHome stamps ("20260912T094645Z"), not
-                # ISO 8601, so device_class=timestamp is deliberately omitted:
-                # HA would reject the value and the entity would show unknown.
-                metadata={"entity_category": "diagnostic"},
-            )
-        )
-    return specs
+    return [
+        EntitySpec(
+            platform="sensor",
+            key="last_key",
+            name="最近使用钥匙",
+            state=key_name,
+        ),
+        EntitySpec(
+            platform="sensor",
+            key="door_event_user",
+            name="最近门事件人员",
+            state=door_user,
+        ),
+        EntitySpec(
+            platform="sensor",
+            key="last_action_time",
+            name="最近操作时间",
+            state=last_action,
+            # The lock reports SmartHome stamps ("20260912T094645Z"), not ISO
+            # 8601, so device_class=timestamp is deliberately omitted: HA would
+            # reject the value and the entity would show unknown.
+            metadata={"entity_category": "diagnostic"},
+        ),
+    ]
 
 
 ADAPTER = ProductKW02Adapter()
