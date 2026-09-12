@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING, Protocol
 
@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 
 StateReader = Callable[["DeviceContext"], Mapping[str, Any]]
 EntityAction = Callable[["DeviceContext", Mapping[str, Any]], Awaitable[None]]
+EventDecoder = Callable[
+    ["DeviceContext", str, Mapping[str, Any], str | None],
+    Iterable[tuple[str, Mapping[str, Any]]],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +28,7 @@ class EntitySpec:
     state: StateReader
     metadata: Mapping[str, Any] = field(default_factory=dict)
     actions: Mapping[str, EntityAction] = field(default_factory=dict)
+    event_decoder: EventDecoder | None = None
 
 
 class HuaweiProductAdapter(Protocol):

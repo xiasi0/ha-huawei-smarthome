@@ -41,6 +41,9 @@ class DeviceContext:
             if service.reported_timestamp
         }
         self._listeners: set[Callable[[], None]] = set()
+        self._service_update_listeners: set[
+            Callable[[str, Mapping[str, Any], str | None], None]
+        ] = set()
 
     @property
     def key(self) -> tuple[str, str]:
@@ -108,6 +111,20 @@ class DeviceContext:
     def remove_state_listener(self, listener: Callable[[], None]) -> None:
         self._listeners.discard(listener)
 
+    def add_service_update_listener(
+        self,
+        listener: Callable[[str, Mapping[str, Any], str | None], None],
+    ) -> None:
+        """Subscribe to accepted live MQTT service updates."""
+
+        self._service_update_listeners.add(listener)
+
+    def remove_service_update_listener(
+        self,
+        listener: Callable[[str, Mapping[str, Any], str | None], None],
+    ) -> None:
+        self._service_update_listeners.discard(listener)
+
     def handle_mqtt_message(self, payload: bytes) -> bool:
         """Handle ACKs and raw device state without interpreting product semantics."""
 
@@ -124,6 +141,7 @@ class DeviceContext:
         changed = self.descriptor.online is not True
         if changed:
             self.descriptor = replace(self.descriptor, online=True)
+        updates: list[tuple[str, Mapping[str, Any], str | None]] = []
         for item in services:
             if not isinstance(item, Mapping):
                 continue
@@ -131,14 +149,20 @@ class DeviceContext:
             data = item.get("data")
             if not isinstance(sid, str) or not isinstance(data, Mapping):
                 continue
+            timestamp = item.get("ts")
+            timestamp = timestamp if isinstance(timestamp, str) else None
+            if not self._should_accept_live_update(sid, data, timestamp):
+                continue
             changed = self._merge_state(
                 sid,
                 data,
-                item.get("ts"),
+                timestamp,
             ) or changed
+            updates.append((sid, dict(data), timestamp))
+        self._notify_service_updates(updates)
         if changed:
             self._notify_state_changed()
-        return changed
+        return changed or bool(updates)
 
     def apply_state_snapshot(
         self,
@@ -178,6 +202,22 @@ class DeviceContext:
     def close(self) -> None:
         self.command_gateway.close()
         self._listeners.clear()
+        self._service_update_listeners.clear()
+
+    def _should_accept_live_update(
+        self,
+        sid: str,
+        data: Mapping[str, Any],
+        timestamp: str | None,
+    ) -> bool:
+        previous_timestamp = self._timestamps.get(sid)
+        if is_older_remote_timestamp(timestamp, previous_timestamp):
+            return False
+        if timestamp and previous_timestamp == timestamp:
+            return False
+        if not timestamp and dict(data) == self._state.get(sid, {}):
+            return False
+        return True
 
     def _merge_state(
         self,
@@ -200,3 +240,11 @@ class DeviceContext:
     def _notify_state_changed(self) -> None:
         for listener in tuple(self._listeners):
             listener()
+
+    def _notify_service_updates(
+        self,
+        updates: list[tuple[str, Mapping[str, Any], str | None]],
+    ) -> None:
+        for sid, data, timestamp in updates:
+            for listener in tuple(self._service_update_listeners):
+                listener(sid, data, timestamp)
