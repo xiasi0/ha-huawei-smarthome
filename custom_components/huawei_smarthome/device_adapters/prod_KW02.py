@@ -533,7 +533,291 @@ class ProductKW02Adapter:
             entities.append(_open_direction_spec(read_unlock))
             entities.append(_last_open_method_spec(profile, read_unlock))
             entities.append(_door_alarm_spec(profile))
+        entities.extend(_weekly_report_specs())
+        entities.extend(_firmware_specs(context))
+        entities.extend(_roster_specs(context))
+        entities.extend(_reader_based_specs(context))
         return tuple(entities)
+
+
+# ---------------------------------------------------------------------------
+# Read-only reporting entities.
+#
+# AGS-X10 firmware reports far more than the public Profile declares: the lock
+# pushes 42 services while the Profile documents 21.  The entities below are
+# read-only projections of services the lock was observed to report on a real
+# device; nothing here writes to the lock and no command is offered, so no
+# unverified write can reach the hardware.
+#
+# Wire details confirmed against the lock (deviating from the Profile):
+#   weeklyReport     battery.remain/consume are percentages; openinfo.total is
+#                    the number of unlocks in `period`; openinfo.userNum counts
+#                    distinct users.
+#   update           currentVersion is a firmware string ("AGS-X10 5.0.0.1(SP65C00)").
+#                    The Profile's update.action is deliberately not exposed.
+#   users            userList carries every enrolled member (un = name).
+#   keyOperate       keyName names the credential used last ("人脸 01").
+#   doorEvent        the per-event feed; its userName is the same person the
+#                    event/eventData pair reports.
+#   lastActionTime   time is the last time the lock was operated.
+# ---------------------------------------------------------------------------
+
+_WEEKLY_REPORT_SID = "weeklyReport"
+_UPDATE_SID = "update"
+_USERS_SID = "users"
+_KEY_OPERATE_SID = "keyOperate"
+_DOOR_EVENT_SID = "doorEvent"
+_LAST_ACTION_SID = "lastActionTime"
+_FACES_SID = "faces"
+_FINGERS_SID = "fingers"
+
+
+def _weekly_battery_field(
+    device: DeviceContext,
+    name: str,
+) -> int | float | None:
+    report = device.value(_WEEKLY_REPORT_SID, "battery")
+    if not isinstance(report, Mapping):
+        return None
+    return _number(report.get(name))
+
+
+def _weekly_open_info(
+    device: DeviceContext,
+    name: str,
+) -> int | float | None:
+    info = device.value(_WEEKLY_REPORT_SID, "openinfo")
+    if not isinstance(info, Mapping):
+        return None
+    return _number(info.get(name))
+
+
+def _weekly_report_specs() -> list[EntitySpec]:
+    """Battery trend and unlock statistics from the weekly report."""
+
+    def remain(device: DeviceContext) -> Mapping[str, Any]:
+        return {"native_value": _weekly_battery_field(device, "remain")}
+
+    def consume(device: DeviceContext) -> Mapping[str, Any]:
+        return {"native_value": _weekly_battery_field(device, "consume")}
+
+    def opens(device: DeviceContext) -> Mapping[str, Any]:
+        return {"native_value": _weekly_open_info(device, "total")}
+
+    def users(device: DeviceContext) -> Mapping[str, Any]:
+        return {"native_value": _weekly_open_info(device, "userNum")}
+
+    def period(device: DeviceContext) -> Mapping[str, Any]:
+        value = device.value(_WEEKLY_REPORT_SID, "period")
+        return {"native_value": value if isinstance(value, str) and value else None}
+
+    def per_user(device: DeviceContext) -> Mapping[str, Any]:
+        """Expose the per-member unlock counts documented by the report."""
+        info = device.value(_WEEKLY_REPORT_SID, "openinfo")
+        if not isinstance(info, Mapping):
+            return {"native_value": None}
+        entries = info.get("info")
+        if not isinstance(entries, list):
+            return {"native_value": None}
+        counts: dict[str, int] = {}
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            name = entry.get("nm")
+            if not isinstance(name, str) or not name:
+                continue
+            days = sum(
+                1 for key, value in entry.items() if key.startswith("d") and value
+            )
+            counts[name] = days
+        if not counts:
+            return {"native_value": None}
+        return {
+            "native_value": len(counts),
+            "members": json.dumps(counts, ensure_ascii=False),
+        }
+
+    return [
+        EntitySpec(
+            platform="sensor",
+            key="weekly_battery_remain",
+            name="周报电池剩余",
+            state=remain,
+            metadata={
+                "native_unit_of_measurement": "%",
+                "device_class": "battery",
+                "state_class": "measurement",
+                "entity_category": "diagnostic",
+            },
+        ),
+        EntitySpec(
+            platform="sensor",
+            key="weekly_battery_consume",
+            name="周报电池消耗",
+            state=consume,
+            metadata={
+                "native_unit_of_measurement": "%",
+                "state_class": "measurement",
+                "entity_category": "diagnostic",
+            },
+        ),
+        EntitySpec(
+            platform="sensor",
+            key="weekly_unlocks",
+            name="本周开门次数",
+            state=opens,
+            metadata={"state_class": "measurement"},
+        ),
+        EntitySpec(
+            platform="sensor",
+            key="weekly_unlock_users",
+            name="本周开锁人数",
+            state=users,
+            metadata={"state_class": "measurement"},
+        ),
+        EntitySpec(
+            platform="sensor",
+            key="weekly_period",
+            name="统计周期",
+            state=period,
+            metadata={"entity_category": "diagnostic"},
+        ),
+        EntitySpec(
+            platform="sensor",
+            key="weekly_per_user",
+            name="本周各成员开门天数",
+            state=per_user,
+            metadata={"entity_category": "diagnostic"},
+        ),
+    ]
+
+
+def _firmware_specs(context: DeviceContext) -> list[EntitySpec]:
+    """Firmware version of the lock body.
+
+    Read-only on purpose: the Profile's ``update.action`` would let HA start an
+    OTA, which has not been validated on this hardware, so only the reported
+    version is projected.
+    """
+
+    if not context.has_service(_UPDATE_SID):
+        return []
+
+    def version(device: DeviceContext) -> Mapping[str, Any]:
+        value = device.value(_UPDATE_SID, "currentVersion")
+        return {"native_value": value if isinstance(value, str) and value else None}
+
+    return [
+        EntitySpec(
+            platform="sensor",
+            key="firmware_version",
+            name="固件版本",
+            state=version,
+            metadata={"entity_category": "diagnostic"},
+        )
+    ]
+
+
+def _roster_specs(context: DeviceContext) -> list[EntitySpec]:
+    """Enrolled-credential counts, e.g. how many faces or fingerprints exist."""
+
+    specs: list[EntitySpec] = []
+
+    def make_count(sid: str, field: str, key: str, name: str) -> EntitySpec:
+        def state(device: DeviceContext) -> Mapping[str, Any]:
+            raw = device.value(sid, field)
+            if not isinstance(raw, list):
+                return {"native_value": None}
+            return {"native_value": len(raw)}
+
+        return EntitySpec(
+            platform="sensor",
+            key=key,
+            name=name,
+            state=state,
+            metadata={"state_class": "measurement", "entity_category": "diagnostic"},
+        )
+
+    if context.has_service(_USERS_SID):
+        def users(device: DeviceContext) -> Mapping[str, Any]:
+            raw = device.value(_USERS_SID, "userList")
+            if not isinstance(raw, list):
+                return {"native_value": None}
+            names = [
+                str(item.get("un"))
+                for item in raw
+                if isinstance(item, Mapping) and item.get("un")
+            ]
+            return {
+                "native_value": len(names),
+                "members": ",".join(names),
+            }
+
+        specs.append(
+            EntitySpec(
+                platform="sensor",
+                key="user_count",
+                name="用户数",
+                state=users,
+                metadata={"state_class": "measurement"},
+            )
+        )
+    if context.has_service(_FACES_SID):
+        specs.append(make_count(_FACES_SID, "face", "face_count", "人脸数"))
+    if context.has_service(_FINGERS_SID):
+        specs.append(make_count(_FINGERS_SID, "finger", "finger_count", "指纹数"))
+    return specs
+
+
+def _reader_based_specs(context: DeviceContext) -> list[EntitySpec]:
+    """Last-operated metadata reported as plain text."""
+
+    specs: list[EntitySpec] = []
+
+    if context.has_service(_KEY_OPERATE_SID):
+        def key_name(device: DeviceContext) -> Mapping[str, Any]:
+            value = device.value(_KEY_OPERATE_SID, "keyName")
+            return {"native_value": value if isinstance(value, str) and value else None}
+
+        specs.append(
+            EntitySpec(
+                platform="sensor",
+                key="last_key",
+                name="最近使用钥匙",
+                state=key_name,
+            )
+        )
+    if context.has_service(_DOOR_EVENT_SID):
+        def door_user(device: DeviceContext) -> Mapping[str, Any]:
+            value = device.value(_DOOR_EVENT_SID, "userName")
+            return {"native_value": value if isinstance(value, str) and value else None}
+
+        specs.append(
+            EntitySpec(
+                platform="sensor",
+                key="door_event_user",
+                name="最近门事件人员",
+                state=door_user,
+            )
+        )
+    if context.has_service(_LAST_ACTION_SID):
+        def last_action(device: DeviceContext) -> Mapping[str, Any]:
+            value = device.value(_LAST_ACTION_SID, "time")
+            return {"native_value": value if isinstance(value, str) and value else None}
+
+        specs.append(
+            EntitySpec(
+                platform="sensor",
+                key="last_action_time",
+                name="最近操作时间",
+                state=last_action,
+                # The lock reports SmartHome stamps ("20260912T094645Z"), not
+                # ISO 8601, so device_class=timestamp is deliberately omitted:
+                # HA would reject the value and the entity would show unknown.
+                metadata={"entity_category": "diagnostic"},
+            )
+        )
+    return specs
 
 
 ADAPTER = ProductKW02Adapter()
