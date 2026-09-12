@@ -533,7 +533,6 @@ class ProductKW02Adapter:
             entities.append(_open_direction_spec(read_unlock))
             entities.append(_last_open_method_spec(profile, read_unlock))
             entities.append(_door_alarm_spec(profile))
-        entities.extend(_weekly_report_specs())
         entities.extend(_firmware_specs(context))
         entities.extend(_roster_specs(context))
         entities.extend(_reader_based_specs(context))
@@ -550,9 +549,6 @@ class ProductKW02Adapter:
 # unverified write can reach the hardware.
 #
 # Wire details confirmed against the lock (deviating from the Profile):
-#   weeklyReport     battery.remain/consume are percentages; openinfo.total is
-#                    the number of unlocks in `period`; openinfo.userNum counts
-#                    distinct users.
 #   update           currentVersion is a firmware string ("AGS-X10 5.0.0.1(SP65C00)").
 #                    The Profile's update.action is deliberately not exposed.
 #   users            userList carries every enrolled member (un = name).
@@ -561,136 +557,6 @@ class ProductKW02Adapter:
 #                    event/eventData pair reports.
 #   lastActionTime   time is the last time the lock was operated.
 # ---------------------------------------------------------------------------
-
-_WEEKLY_REPORT_SID = "weeklyReport"
-_UPDATE_SID = "update"
-_USERS_SID = "users"
-_KEY_OPERATE_SID = "keyOperate"
-_DOOR_EVENT_SID = "doorEvent"
-_LAST_ACTION_SID = "lastActionTime"
-_FACES_SID = "faces"
-_FINGERS_SID = "fingers"
-
-
-def _weekly_battery_field(
-    device: DeviceContext,
-    name: str,
-) -> int | float | None:
-    report = device.value(_WEEKLY_REPORT_SID, "battery")
-    if not isinstance(report, Mapping):
-        return None
-    return _number(report.get(name))
-
-
-def _weekly_open_info(
-    device: DeviceContext,
-    name: str,
-) -> int | float | None:
-    info = device.value(_WEEKLY_REPORT_SID, "openinfo")
-    if not isinstance(info, Mapping):
-        return None
-    return _number(info.get(name))
-
-
-def _weekly_report_specs() -> list[EntitySpec]:
-    """Battery trend and unlock statistics from the weekly report."""
-
-    def remain(device: DeviceContext) -> Mapping[str, Any]:
-        return {"native_value": _weekly_battery_field(device, "remain")}
-
-    def consume(device: DeviceContext) -> Mapping[str, Any]:
-        return {"native_value": _weekly_battery_field(device, "consume")}
-
-    def opens(device: DeviceContext) -> Mapping[str, Any]:
-        return {"native_value": _weekly_open_info(device, "total")}
-
-    def users(device: DeviceContext) -> Mapping[str, Any]:
-        return {"native_value": _weekly_open_info(device, "userNum")}
-
-    def period(device: DeviceContext) -> Mapping[str, Any]:
-        value = device.value(_WEEKLY_REPORT_SID, "period")
-        return {"native_value": value if isinstance(value, str) and value else None}
-
-    def per_user(device: DeviceContext) -> Mapping[str, Any]:
-        """Expose the per-member unlock counts documented by the report."""
-        info = device.value(_WEEKLY_REPORT_SID, "openinfo")
-        if not isinstance(info, Mapping):
-            return {"native_value": None}
-        entries = info.get("info")
-        if not isinstance(entries, list):
-            return {"native_value": None}
-        counts: dict[str, int] = {}
-        for entry in entries:
-            if not isinstance(entry, Mapping):
-                continue
-            name = entry.get("nm")
-            if not isinstance(name, str) or not name:
-                continue
-            days = sum(
-                1 for key, value in entry.items() if key.startswith("d") and value
-            )
-            counts[name] = days
-        if not counts:
-            return {"native_value": None}
-        return {
-            "native_value": len(counts),
-            "members": json.dumps(counts, ensure_ascii=False),
-        }
-
-    return [
-        EntitySpec(
-            platform="sensor",
-            key="weekly_battery_remain",
-            name="周报电池剩余",
-            state=remain,
-            metadata={
-                "native_unit_of_measurement": "%",
-                "device_class": "battery",
-                "state_class": "measurement",
-                "entity_category": "diagnostic",
-            },
-        ),
-        EntitySpec(
-            platform="sensor",
-            key="weekly_battery_consume",
-            name="周报电池消耗",
-            state=consume,
-            metadata={
-                "native_unit_of_measurement": "%",
-                "state_class": "measurement",
-                "entity_category": "diagnostic",
-            },
-        ),
-        EntitySpec(
-            platform="sensor",
-            key="weekly_unlocks",
-            name="本周开门次数",
-            state=opens,
-            metadata={"state_class": "measurement"},
-        ),
-        EntitySpec(
-            platform="sensor",
-            key="weekly_unlock_users",
-            name="本周开锁人数",
-            state=users,
-            metadata={"state_class": "measurement"},
-        ),
-        EntitySpec(
-            platform="sensor",
-            key="weekly_period",
-            name="统计周期",
-            state=period,
-            metadata={"entity_category": "diagnostic"},
-        ),
-        EntitySpec(
-            platform="sensor",
-            key="weekly_per_user",
-            name="本周各成员开门天数",
-            state=per_user,
-            metadata={"entity_category": "diagnostic"},
-        ),
-    ]
-
 
 def _firmware_specs(context: DeviceContext) -> list[EntitySpec]:
     """Firmware version of the lock body.
