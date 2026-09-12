@@ -10,6 +10,7 @@ from homeassistant.components.light import (
     ATTR_RGB_COLOR,
     ColorMode,
     LightEntity,
+    filter_supported_color_modes,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -40,17 +41,13 @@ class HuaweiAdapterLight(LightEntity):
         self._attr_has_entity_name = True
         self._attr_should_poll = False
         modes = {
-            ColorMode(mode) for mode in metadata.get("supported_color_modes", {"onoff"})
+            ColorMode(mode)
+            for mode in metadata.get("supported_color_modes", {"onoff"})
         }
-        # HA >= 2024.7 rejects supported_color_modes that combine ONOFF or
-        # BRIGHTNESS with real color modes ("sets invalid supported color
-        # modes"); both are implied by any other color mode, so drop them.
-        advanced = modes - {ColorMode.ONOFF, ColorMode.BRIGHTNESS, ColorMode.WHITE}
-        if advanced:
-            modes = advanced | (modes & {ColorMode.WHITE})
-        elif not modes:
-            modes = {ColorMode.ONOFF}
-        self._attr_supported_color_modes = modes
+        # Use HA's own capability normalization.  Product adapters still
+        # declare the device capability; this only removes HA-implied ONOFF
+        # and BRIGHTNESS modes before LightEntity validates the set.
+        self._attr_supported_color_modes = filter_supported_color_modes(modes)
         if metadata.get("min_color_temp_kelvin") is not None:
             self._attr_min_color_temp_kelvin = int(
                 metadata["min_color_temp_kelvin"]
