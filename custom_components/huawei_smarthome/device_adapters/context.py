@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from datetime import datetime
 from typing import Any
 
 from ..domain.models import (
     RemoteDeviceDescriptor,
     RemoteServiceState,
     is_older_remote_timestamp,
+    parse_remote_timestamp,
 )
 from ..mqtt.commands import HuaweiCommandGateway
 from ..mqtt.protocol import decode_message
@@ -88,6 +90,25 @@ class DeviceContext:
 
     def service_state(self, sid: str) -> Mapping[str, Any]:
         return dict(self._state.get(sid, {}))
+
+    def service_updated_at(self, sid: str) -> datetime | None:
+        """Return when one service was last updated by the device.
+
+        Some services (camera ``alarmEvent``, lock ``event``, button reports)
+        carry event semantics: the cloud pushes a value once and never sends
+        the cleared one, so the raw state stays at its last value forever.
+        Without the update time an adapter cannot tell "just happened" from
+        "happened days ago", and a state-style entity latches on.
+
+        The timestamp is the device-reported one (MQTT ``ts`` / snapshot
+        ``reported_timestamp``), so it reflects when the device observed the
+        change rather than when HA received it.
+        """
+
+        timestamp = self._timestamps.get(sid)
+        if not timestamp:
+            return None
+        return parse_remote_timestamp(timestamp)
 
     async def async_send_service(
         self,

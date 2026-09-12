@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 
 StateReader = Callable[["DeviceContext"], Mapping[str, Any]]
 EntityAction = Callable[["DeviceContext", Mapping[str, Any]], Awaitable[None]]
+# Returns the events that are outstanding for the device right now, keyed by
+# event type.  The framework diffs consecutive readings and fires the ones
+# that are new, so the reader stays a pure function like ``StateReader``.
+EventReader = Callable[["DeviceContext"], Mapping[str, Mapping[str, Any]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +28,10 @@ class EntitySpec:
     state: StateReader
     metadata: Mapping[str, Any] = field(default_factory=dict)
     actions: Mapping[str, EntityAction] = field(default_factory=dict)
+    # Only meaningful for platform="event": lets an adapter report one-shot
+    # occurrences (detections, button presses, door events) that HA
+    # automations can trigger on, instead of only a standing state.
+    events: EventReader | None = None
 
 
 class HuaweiProductAdapter(Protocol):
