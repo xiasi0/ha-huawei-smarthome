@@ -421,6 +421,167 @@ def _event_record(device: DeviceContext) -> Mapping[str, Any]:
     return record
 
 
+def _event_kind(record: Mapping[str, Any]) -> str | None:
+    """Classify one lock event record as unlock / lock / alarm / motion.
+
+    The classification mirrors the adapter's own state entities so an event and
+    its matching sensor can never disagree about what happened.
+
+    Two wire quirks drive the order of the checks:
+
+    * ``event`` is emitted only for credential unlocks and its ``up`` lives in a
+      different code space (201 for a credential unlock, never a Profile value),
+      so an ``up`` the Profile cannot place is not "no event" when the record
+      carries a user name -- it is an unlock.  ``eventData`` remains the
+      authority for operations it does describe.
+    * the observed ``event`` payload for a loitering detection also carried
+      ``up: 201`` while its ``aid`` embedded ``MOTION_DETECTION``, so the aid
+      token is checked first and otherwise such a record would be reported as an
+      unlock.
+    """
+
+    identifier = record.get("aid")
+    if isinstance(identifier, str) and "MOTION_DETECTION" in identifier.upper():
+        return "motion"
+    alarm = _number(record.get(_DOOR_ALARM_FIELD))
+    if alarm is not None and alarm >= 1:
+        return "alarm"
+    operation = _number(record.get(_USER_OPERATION_FIELD))
+    if operation == _OPERATION_RELOCK:
+        return "lock"
+    if _unlock_direction(operation) is not None:
+        return "unlock"
+    # An operation the Profile does not describe, together with a user name,
+    # is the credential-unlock copy of the event.
+    user = record.get("un")
+    if isinstance(user, str) and user.strip():
+        return "unlock"
+    return None
+
+
+def _event_identifier(record: Mapping[str, Any]) -> str | None:
+    """Return the identifier the lock assigns to one occurrence.
+
+    ``event``/``eventData`` carry ``eid``, which increments per event, so it is
+    what actually distinguishes two consecutive unlocks.  The nested
+    ``aid``/``id`` fields are a fallback for revisions that omit ``eid``.
+    """
+
+    for key in ("eid", "aid", "id"):
+        value = record.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _lock_event_decoder(
+    device: DeviceContext,
+    sid: str,
+    data: Mapping[str, Any],
+    timestamp: str | None,
+) -> list[tuple[str, Mapping[str, Any]]]:
+    """Turn one lock event push into a Home Assistant event.
+
+    The lock pushes every operation once and never sends the cleared value, so
+    the state entities (最近开门方式 / 开门方向 / 最近告警) only describe *what
+    happened last*.  Two consecutive unlocks by the same person through the same
+    method produce no state change at all, which means an automation built on
+    those entities runs once and then stops.
+
+    This decoder supplies the missing half: each accepted push fires an event.
+
+    ``event`` carries the user-facing fields (``un`` = user name, ``cl`` =
+    clock) while ``eventData`` carries the operation and alarm codes, so the two
+    are merged exactly the way ``_event_record`` does for the state readers.
+    """
+
+    if sid not in (_EVENT_SID, _EVENT_DATA_SID):
+        return []
+
+    # Decode THIS push, not the standing record.  ``_event_record`` merges both
+    # services because the state readers want the latest known picture, but an
+    # event must not inherit the previous occurrence: the lock reports a
+    # "door closed" record on ``eventData`` right after an unlock, so merging the
+    # cached half would relabel that unlock as a lock and reuse its id.
+    #
+    # The other service is therefore consulted only for fields this push does
+    # not carry: ``un``/``cl`` arrive on ``event`` while ``up``/``das`` arrive on
+    # ``eventData``, and a push may legitimately carry only one half.
+    def _parsed_payload(value: Any) -> Mapping[str, Any]:
+        if isinstance(value, Mapping):
+            return value
+        if isinstance(value, str) and value:
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                return {}
+            if isinstance(parsed, Mapping):
+                return parsed
+        return {}
+
+    current: dict[str, Any] = dict(data)
+    if sid == _EVENT_DATA_SID:
+        current.pop(_EVENT_DATA_PAYLOAD_FIELD, None)
+        current.update(_parsed_payload(data.get(_EVENT_DATA_PAYLOAD_FIELD)))
+    elif sid == _EVENT_SID:
+        current.update(device.service_state(_EVENT_DATA_SID))
+        current.pop(_EVENT_DATA_PAYLOAD_FIELD, None)
+        other = _parsed_payload(
+            device.value(_EVENT_DATA_SID, _EVENT_DATA_PAYLOAD_FIELD)
+        )
+        # Only fill in what this push lacks, and never take the *identity* of an
+        # event from the other service.
+        for key, value in other.items():
+            if key in ("eid", "aid", "id", "et"):
+                continue
+            current.setdefault(key, value)
+
+    merged = current
+
+    kind = _event_kind(merged)
+    if kind is None:
+        # Credential management, arming, doorbell and similar records are not
+        # user-visible door events, so they deliberately produce nothing.
+        return []
+
+    operation = _number(merged.get(_USER_OPERATION_FIELD))
+    profile_field = _field(
+        device.profile or {}, _EVENT_SID, _USER_OPERATION_PROFILE_FIELD
+    ) or {}
+    alarm_field = _field(
+        device.profile or {}, _EVENT_SID, _DOOR_ALARM_PROFILE_FIELD
+    ) or {}
+
+    payload: dict[str, Any] = {
+        "event_id": _event_identifier(merged),
+        "user": merged.get("un"),
+        "clock": merged.get("cl"),
+        "occurred_at": merged.get("et") or timestamp,
+        "method": _operation_label(profile_field, operation),
+        "direction": _unlock_direction(operation),
+    }
+    alarm_code = _number(merged.get(_DOOR_ALARM_FIELD))
+    if kind == "alarm":
+        payload["alarm"] = _enum_label(alarm_field, alarm_code)
+    return [(kind, {k: v for k, v in payload.items() if v is not None})]
+
+
+def _lock_event_spec() -> EntitySpec:
+    """One event entity that fires for every unlock, lock and door alarm."""
+
+    return EntitySpec(
+        platform="event",
+        key="lock_event",
+        name="门锁事件",
+        state=lambda device: {},
+        metadata={
+            "event_types": ["unlock", "lock", "alarm", "motion"],
+            "icon": "mdi:door-open",
+        },
+        event_decoder=_lock_event_decoder,
+    )
+
+
 def _unlock_reader() -> Callable[[DeviceContext], Any]:
     """Return a reader that keeps the latest unlock seen by one entity.
 
@@ -533,6 +694,10 @@ class ProductKW02Adapter:
             entities.append(_open_direction_spec(read_unlock))
             entities.append(_last_open_method_spec(profile, read_unlock))
             entities.append(_door_alarm_spec(profile))
+            # The state entities above describe the latest operation; this event
+            # entity fires on every operation, so an automation runs on each
+            # unlock instead of only on the first one.
+            entities.append(_lock_event_spec())
         entities.extend(_firmware_specs(context))
         entities.extend(_roster_specs(context))
         entities.extend(_reader_based_specs(context))
