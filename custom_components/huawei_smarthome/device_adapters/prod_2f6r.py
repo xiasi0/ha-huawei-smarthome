@@ -71,6 +71,10 @@ _LIGHT_STATUS_FIELD = "status"
 _HA_BRIGHTNESS_MIN = 1
 _HA_BRIGHTNESS_MAX = 255
 
+# The lamp only dims; it has no colour or colour-temperature control, so HA's
+# brightness colour mode is the only one it can be in.
+_COLOR_MODE_BRIGHTNESS = "brightness"
+
 
 def _service(profile: Mapping[str, Any], sid: str) -> Mapping[str, Any] | None:
     for service in profile.get("services", ()):
@@ -286,12 +290,26 @@ class Product2F6RAdapter:
                 field = _field(device.profile or {}, _BRIGHTNESS_SID, _BRIGHTNESS_FIELD)
                 is_on = _bool(device.value(_SWITCH_SID, _SWITCH_FIELD))
                 if field is None:
-                    return {"is_on": is_on, "brightness": None}
+                    return {
+                        "is_on": is_on,
+                        "brightness": None,
+                        "color_mode": _COLOR_MODE_BRIGHTNESS,
+                    }
+                # The lamp reports brightness 0 while it is off, which is "no
+                # brightness" rather than "minimum brightness": mapping it onto
+                # the Profile's 1..100 range would describe a lit lamp at its
+                # dimmest.  Off therefore reports no brightness, matching what
+                # the vendor app shows for the same state.
+                raw = device.value(_BRIGHTNESS_SID, _BRIGHTNESS_FIELD)
+                brightness = (
+                    None
+                    if not is_on and _number(raw) == 0
+                    else _device_brightness_to_ha(raw, field)
+                )
                 return {
                     "is_on": is_on,
-                    "brightness": _device_brightness_to_ha(
-                        device.value(_BRIGHTNESS_SID, _BRIGHTNESS_FIELD), field
-                    ),
+                    "brightness": brightness,
+                    "color_mode": _COLOR_MODE_BRIGHTNESS,
                 }
 
             entities.append(
