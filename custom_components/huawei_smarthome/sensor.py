@@ -51,6 +51,15 @@ class HuaweiAdapterSensor(SensorEntity):
     def native_value(self) -> Any:
         return self._spec.state(self._device_context).get("native_value")
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        # Everything the adapter returns besides native_value rides along as an
+        # attribute.  Event-driven specs use this to publish a per-event id next
+        # to a latched state value, so automations can trigger on the attribute
+        # changing while the state keeps naming the last value.
+        state = self._spec.state(self._device_context)
+        return {key: value for key, value in state.items() if key != "native_value"}
+
     async def async_added_to_hass(self) -> None:
         self._device_context.add_state_listener(self._state_changed)
 

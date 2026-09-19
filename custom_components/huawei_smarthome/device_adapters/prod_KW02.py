@@ -64,6 +64,8 @@ _EVENT_DATA_SID = "eventData"
 _EVENT_DATA_PAYLOAD_FIELD = "data"
 _USER_OPERATION_FIELD = "up"
 _DOOR_ALARM_FIELD = "das"
+_EVENT_ID_FIELD = "eid"
+_EVENT_TIME_FIELD = "et"
 
 # Profile characteristic names, used only to resolve enum labels.
 _USER_OPERATION_PROFILE_FIELD = "userOperation"
@@ -613,31 +615,58 @@ def _lock_event_spec() -> EntitySpec:
     )
 
 
-def _unlock_reader() -> Callable[[DeviceContext], Any]:
+def _unlock_reader() -> Callable[[DeviceContext], Mapping[str, Any]]:
     """Return a reader that keeps the latest unlock seen by one entity.
 
     The lock reports every event on ``eventData``, so reading the field directly
     would let a following record such as "door closed" overwrite the unlock
     code.  The most recent value the Profile recognises as an unlock is cached
-    instead, and later non-unlock records leave it untouched.
+    instead, and later non-unlock records leave it untouched.  The triggering
+    event's id and clock are cached with it, because a latched direction alone
+    cannot tell two unlocks from the same side apart.
     """
 
-    cache: dict[str, Any] = {"operation": None}
+    cache: dict[str, Any] = {}
 
-    def read(device: DeviceContext) -> Any:
-        operation = _number(_event_record(device).get(_USER_OPERATION_FIELD))
+    def read(device: DeviceContext) -> Mapping[str, Any]:
+        record = _event_record(device)
+        operation = _number(record.get(_USER_OPERATION_FIELD))
         if _unlock_direction(operation) is not None:
-            cache["operation"] = operation
-        return cache["operation"]
+            cache.clear()
+            cache.update(
+                operation=operation,
+                eid=record.get(_EVENT_ID_FIELD),
+                time=record.get(_EVENT_TIME_FIELD),
+            )
+        return cache
 
     return read
 
 
-def _open_direction_spec(read_unlock: Callable[[DeviceContext], Any]) -> EntitySpec:
-    """Expose whether the latest unlock came from the indoor or outdoor side."""
+def _open_direction_spec(
+    read_unlock: Callable[[DeviceContext], Mapping[str, Any]],
+) -> EntitySpec:
+    """Expose whether the latest unlock came from the indoor or outdoor side.
+
+    The state latches on the last unlock's side, so unlocking twice in a row
+    from the same side leaves it unchanged and a state trigger on the state
+    alone would never fire for the second unlock.  The triggering event's id
+    and clock therefore ride along as attributes: they change on every unlock,
+    so an automation can trigger on ``attribute: last_event_id`` and still read
+    the side from the state.  Both come from one state read, so they always
+    describe the same event.
+    """
 
     def state(device: DeviceContext) -> Mapping[str, Any]:
-        return {"native_value": _unlock_direction(read_unlock(device))}
+        unlock = read_unlock(device)
+        direction = _unlock_direction(unlock.get("operation"))
+        if direction is None:
+            return {"native_value": None}
+        return {
+            "native_value": direction,
+            "last_event_id": unlock.get("eid"),
+            "last_event_time": unlock.get("time"),
+        }
 
     return EntitySpec(
         platform="sensor",
@@ -649,17 +678,26 @@ def _open_direction_spec(read_unlock: Callable[[DeviceContext], Any]) -> EntityS
 
 def _last_open_method_spec(
     profile: Mapping[str, Any],
-    read_unlock: Callable[[DeviceContext], Any],
+    read_unlock: Callable[[DeviceContext], Mapping[str, Any]],
 ) -> EntitySpec:
-    """Expose the Profile label of the latest unlock operation."""
+    """Expose the Profile label of the latest unlock operation.
+
+    Carries the same ``last_event_id``/``last_event_time`` attributes as the
+    direction sensor, so either entity can drive a state-attribute trigger.
+    """
 
     field = _field(profile, _EVENT_SID, _USER_OPERATION_PROFILE_FIELD) or {}
 
     def state(device: DeviceContext) -> Mapping[str, Any]:
-        value = _number(read_unlock(device))
+        unlock = read_unlock(device)
+        value = _number(unlock.get("operation"))
         if value is None:
             return {"native_value": None}
-        return {"native_value": _operation_label(field, value) or str(value)}
+        return {
+            "native_value": _operation_label(field, value) or str(value),
+            "last_event_id": unlock.get("eid"),
+            "last_event_time": unlock.get("time"),
+        }
 
     return EntitySpec(
         platform="sensor",
