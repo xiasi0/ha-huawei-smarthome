@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
 
 from .device_adapters.api import EntitySpec
@@ -76,5 +77,8 @@ class AdapterEntityMixin:
     async def _run_action(self, name: str, data: Mapping[str, Any]) -> None:
         action = self._spec.actions.get(name)
         if action is None:
-            raise ValueError(f"adapter action is unavailable: {name}")
+            # HomeAssistantError surfaces its message to the caller, so a
+            # service call on an unsupported action says what is wrong instead
+            # of collapsing into a generic "failed to call service".
+            raise HomeAssistantError(f"the device does not support '{name}'")
         await action(self._device_context, data)

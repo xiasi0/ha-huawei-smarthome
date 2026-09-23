@@ -91,6 +91,39 @@ def normalize_device_detail(payload: Any) -> RemoteDeviceDescriptor:
     return _normalize_device(candidate, datetime.now(timezone.utc))
 
 
+_DYNAMIC_STATE_LIST_KEYS = (
+    "data",
+    "devices",
+    "deviceList",
+    "deviceStates",
+    "result",
+)
+
+
+def _unwrap_dynamic_state_list(payload: Any) -> Any:
+    """Unwrap an optional response envelope around the device-state list.
+
+    ``/v5/devices/info`` returns a bare JSON array, but the batch dynamic-state
+    endpoint may wrap the same array inside a result object.  Only list-valued
+    candidates are accepted so that a genuine error envelope is still reported
+    as invalid protocol data instead of being silently treated as no state.
+    """
+
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, Mapping):
+        return payload
+    for key in _DYNAMIC_STATE_LIST_KEYS:
+        candidate = payload.get(key)
+        if isinstance(candidate, list):
+            return candidate
+        if isinstance(candidate, Mapping):
+            nested = _unwrap_dynamic_state_list(candidate)
+            if isinstance(nested, list):
+                return nested
+    return payload
+
+
 def normalize_dynamic_states(
     payload: Any,
     *,
@@ -99,6 +132,7 @@ def normalize_dynamic_states(
     """Normalize the batch device-state response."""
 
     received_at = received_at or datetime.now(timezone.utc)
+    payload = _unwrap_dynamic_state_list(payload)
     if not isinstance(payload, list):
         raise InvalidProtocolDataError(
             "dynamic device-state response is not a JSON list"
