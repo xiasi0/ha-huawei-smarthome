@@ -8,6 +8,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity import EntityCategory
 
 from .entity_helpers import device_info, entity_available, iter_specs
 
@@ -32,6 +33,8 @@ class HuaweiAdapterSwitch(SwitchEntity):
         self._attr_name = spec.name or spec.key
         self._attr_has_entity_name = True
         self._attr_should_poll = False
+        if spec.metadata and spec.metadata.get("entity_category") in {"config", "diagnostic"}:
+            self._attr_entity_category = EntityCategory(spec.metadata.get("entity_category"))
 
     @property
     def device_info(self):

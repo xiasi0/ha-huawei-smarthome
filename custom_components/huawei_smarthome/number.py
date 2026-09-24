@@ -8,6 +8,7 @@ from homeassistant.components.number import NumberEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity import EntityCategory
 
 from .entity_helpers import device_info, entity_available, iter_specs
 
@@ -35,6 +36,8 @@ class HuaweiAdapterNumber(NumberEntity):
         self._attr_native_max_value = float(metadata["max"])
         self._attr_native_step = float(metadata.get("step", 1))
         self._attr_native_unit_of_measurement = metadata.get("unit")
+        if metadata and metadata.get("entity_category") in {"config", "diagnostic"}:
+            self._attr_entity_category = EntityCategory(metadata.get("entity_category"))
         self._attr_has_entity_name = True
         self._attr_should_poll = False
 

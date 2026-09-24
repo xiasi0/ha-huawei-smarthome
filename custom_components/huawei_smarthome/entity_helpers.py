@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 
 from .device_adapters.api import EntitySpec
 from .device_adapters.context import DeviceContext
@@ -50,6 +50,8 @@ class AdapterEntityMixin:
         self._spec = spec
         self._attr_unique_id = f"{context.home_id}_{context.dev_id}_{spec.key}"
         self._attr_name = spec.name or spec.key
+        if spec.metadata and spec.metadata.get("entity_category") in {"config", "diagnostic"}:
+            self._attr_entity_category = EntityCategory(spec.metadata.get("entity_category"))
         self._attr_has_entity_name = True
         self._attr_should_poll = False
 

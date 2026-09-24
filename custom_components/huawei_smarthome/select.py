@@ -8,6 +8,7 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity import EntityCategory
 
 from .entity_helpers import device_info, entity_available, iter_specs
 
@@ -28,9 +29,12 @@ class HuaweiAdapterSelect(SelectEntity):
     def __init__(self, context: Any, spec: Any) -> None:
         self._device_context = context
         self._spec = spec
+        metadata = spec.metadata
         self._attr_unique_id = f"{context.home_id}_{context.dev_id}_{spec.key}"
         self._attr_name = spec.name or spec.key
-        self._attr_options = list(spec.metadata.get("options", ()))
+        self._attr_options = list(metadata.get("options", ()))
+        if metadata and metadata.get("entity_category") in {"config", "diagnostic"}:
+            self._attr_entity_category = EntityCategory(metadata.get("entity_category"))
         self._attr_has_entity_name = True
         self._attr_should_poll = False
 
