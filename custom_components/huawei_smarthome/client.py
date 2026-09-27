@@ -13,6 +13,7 @@ from typing import Protocol
 from .api.client import SmartHomeDiscoveryApi
 from .api.errors import AuthExpiredError
 from .auth.huawei import HuaweiSmartHomeAuthProvider
+from .auth.session import CredentialStore as SessionCredentialStore
 from .auth.session import SessionManager
 from .const import (
     OBSERVED_MQTT_FILTER,
@@ -44,8 +45,12 @@ from .sync_coordinator import SmartHomeSyncCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 
-class CredentialStore(Protocol):
-    """Account credential and local device-preference storage."""
+class CredentialStore(SessionCredentialStore, Protocol):
+    """Account credential and local device-preference storage.
+
+    Extends the refresh-side port with the credential and local-preference
+    reads this client needs, so both views cannot drift apart.
+    """
 
     async def async_load(
         self,
@@ -54,9 +59,6 @@ class CredentialStore(Protocol):
         identity_fingerprint: str | None = None,
     ) -> AuthSession | None:
         """Load credentials bound to the account and client identity."""
-
-    async def async_save(self, session: AuthSession) -> None:
-        """Persist a refreshed account session."""
 
     async def async_get_device_exclusions(self, account: str) -> frozenset[str]:
         """Load devices excluded from the local HA projection."""
@@ -763,6 +765,7 @@ class HuaweiSmartHomeClient:
             if key not in current:
                 context.close()
         self._protocol_devices = current
+
     def _is_excluded_device(self, descriptor: RemoteDeviceDescriptor) -> bool:
         """Return whether a remote device is excluded from HA projection."""
 
