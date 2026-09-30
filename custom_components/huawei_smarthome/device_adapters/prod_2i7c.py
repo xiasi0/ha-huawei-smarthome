@@ -5,11 +5,17 @@ Device: 欧普照明 蓝牙Mesh双色温灯带驱动 / OPPLE SMART Strip Light D
 ``226``, protocolType ``Mesh``).
 Profile: https://smarthome-drcn.dbankcdn.com/device/guide/2I7C/2I7C.json
 
-Exposed entity:
+Exposed entities:
 
 * ``light`` "设备名" <- ``switch.on``
                     / ``brightness.brightness``    (int 1..100 %)
                     / ``cct.colorTemperature``     (int 2700..5700 K)
+* ``button`` "开关反转" <- ``toggleSwitch.toggle`` = 1.  The Profile marks this
+  field writable (RW) with the values 反转 / 不反转.  It is a stateless toggle,
+  so it is exposed as a HA ``button`` that sends the momentary command, rather
+  than a ``switch`` that would require an on/off state the device never reports
+  for this field.  The vendor H5 bundle never calls ``setDeviceInfo`` on it, so
+  this mapping is derived from the Profile and is not yet verified on a device.
 
 ``supported_color_modes`` is ``{"color_temp"}`` only: HA lets that single mode
 cover on/off, brightness and colour temperature, and HA rejects combining
@@ -19,12 +25,6 @@ range and a colour temperature range, no light entity is created at all.
 
 Deliberately *not* exposed:
 
-* ``toggleSwitch.toggle`` ("开关翻转") — the vendor H5 bundle never calls
-  ``setDeviceInfo`` on it (the only outgoing calls are ``switch.on``,
-  ``brightness.brightness`` and ``cct.colorTemperature``), and its write
-  semantics are a stateless toggle that conflicts with HA's state-driven
-  ``light.toggle``.  Following the "no entity over a guessed mapping" rule it
-  stays out; users toggle via the light entity itself.
 * ``commonFaultDetection`` / ``netInfo`` / ``update`` — read-only diagnostics
   and OTA, consistent with the other strip-light adapters.
 
@@ -54,6 +54,8 @@ _BRIGHTNESS_SID = "brightness"
 _BRIGHTNESS_FIELD = "brightness"
 _CCT_SID = "cct"
 _CCT_FIELD = "colorTemperature"
+_TOGGLE_SID = "toggleSwitch"
+_TOGGLE_FIELD = "toggle"
 
 # HA's brightness scale.  The floor is 1, not 0, because HA renders 0 as "off".
 _HA_BRIGHTNESS_MIN = 1
@@ -217,6 +219,11 @@ async def _turn_off(context: DeviceContext, _data: Mapping[str, Any]) -> None:
     await context.async_send_service(_SWITCH_SID, {_SWITCH_FIELD: 0})
 
 
+async def _press_toggle(context: DeviceContext, _data: Mapping[str, Any]) -> None:
+    # Profile: toggleSwitch.toggle 1 = 反转 (momentary), 0 = 不反转.
+    await context.async_send_service(_TOGGLE_SID, {_TOGGLE_FIELD: 1})
+
+
 class Product2i7cAdapter:
     """Keep all 2I7C entity and command choices in this file."""
 
@@ -251,7 +258,7 @@ class Product2i7cAdapter:
                 "color_mode": _COLOR_MODE_CCT,
             }
 
-        return (
+        entities: list[EntitySpec] = [
             EntitySpec(
                 platform="light",
                 key="light",
@@ -269,7 +276,24 @@ class Product2i7cAdapter:
                     "turn_off": _turn_off,
                 },
             ),
-        )
+        ]
+
+        # "开关反转": a stateless momentary toggle, exposed as a HA button.
+        if (
+            context.has_service(_TOGGLE_SID)
+            and _field(profile, _TOGGLE_SID, _TOGGLE_FIELD) is not None
+        ):
+            entities.append(
+                EntitySpec(
+                    platform="button",
+                    key="toggle_switch",
+                    name="开关反转",
+                    state=lambda _device: {},
+                    actions={"press": _press_toggle},
+                )
+            )
+
+        return tuple(entities)
 
 
 ADAPTER = Product2i7cAdapter()
