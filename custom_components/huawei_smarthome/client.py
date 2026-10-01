@@ -513,13 +513,25 @@ class HuaweiSmartHomeClient:
         states: list[RemoteDeviceState] = []
         for home_id, device_ids_raw in devices_by_home.items():
             device_ids = tuple(dict.fromkeys(device_ids_raw))
-            states.extend(
-                await self.api.async_get_dynamic_states(
-                    session,
-                    device_ids,
-                    home_id=home_id,
+            try:
+                states.extend(
+                    await self.api.async_get_dynamic_states(
+                        session,
+                        device_ids,
+                        home_id=home_id,
+                    )
                 )
-            )
+            except AuthExpiredError:
+                raise
+            except Exception as error:  # noqa: BLE001 - one home must not block others
+                _LOGGER.warning(
+                    "Huawei SmartHome dynamic state failed: home=%s devices=%s "
+                    "error=%s: %s",
+                    home_id,
+                    len(device_ids),
+                    type(error).__name__,
+                    str(error),
+                )
         state_batch = tuple(states)
         self._apply_dynamic_states(state_batch)
         if persist:
