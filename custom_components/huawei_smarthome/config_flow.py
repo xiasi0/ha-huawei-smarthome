@@ -119,12 +119,20 @@ class HuaweiSmartHomeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Collect an optional device challenge code when required."""
 
+        # Invariant: "{prompt}。" in translations must always be given a placeholder,
+        # or formatjs raises MISSING_VALUE on every rendering of this step.
+        description_placeholders = {
+            "prompt": self._challenge.prompt if self._challenge is not None else ""
+        }
+        schema = vol.Schema({vol.Required("challenge_code"): str})
+
         if user_input is not None:
             code = str(user_input.get("challenge_code", "")).strip()
             if not self._provider or not code:
                 return self.async_show_form(
                     step_id="challenge",
-                    data_schema=vol.Schema({vol.Required("challenge_code"): str}),
+                    data_schema=schema,
+                    description_placeholders=description_placeholders,
                     errors={"base": "invalid_auth"},
                 )
             try:
@@ -132,7 +140,8 @@ class HuaweiSmartHomeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except InvalidCredentialsError:
                 return self.async_show_form(
                     step_id="challenge",
-                    data_schema=vol.Schema({vol.Required("challenge_code"): str}),
+                    data_schema=schema,
+                    description_placeholders=description_placeholders,
                     errors={"base": "invalid_auth"},
                 )
             except AuthenticationError as error:
@@ -143,12 +152,9 @@ class HuaweiSmartHomeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_abort(reason="cannot_connect")
             return await self._prepare_discovery()
 
-        description_placeholders = {}
-        if self._challenge is not None:
-            description_placeholders = {"prompt": self._challenge.prompt}
         return self.async_show_form(
             step_id="challenge",
-            data_schema=vol.Schema({vol.Required("challenge_code"): str}),
+            data_schema=schema,
             description_placeholders=description_placeholders,
         )
 
