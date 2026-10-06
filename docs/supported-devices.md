@@ -142,7 +142,7 @@
 | `X0A0` | 华为AI音箱 FLMG-10 | 华为 | 智能音箱 |
 | `2QQ4` | IAM 智能消毒空气净化器 X5 Ultra（免换芯） | 艾恩科技集团 | 空气净化器 |
 | `ZF0H` | 华为全屋智能 智能中控屏 S2 | 华为 | 全屋中控面板 |
-
+| `A1H6` | 九阳智能养生壶 K15D-WY520(HM) | 九阳 | 养生壶 |
 ## 维护规则
 
 新增单品时，在 `custom_components/huawei_smarthome/device_adapters/` 增加对应的 `prod_<prodId>.py`，并同步更新本表。重复 `prodId` 不应新增第二个适配器文件。
