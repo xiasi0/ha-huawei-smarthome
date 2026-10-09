@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from .api import EntitySpec
@@ -66,6 +68,18 @@ _USER_OPERATION_FIELD = "up"
 _DOOR_ALARM_FIELD = "das"
 _EVENT_ID_FIELD = "eid"
 _EVENT_TIME_FIELD = "et"
+
+# The unlock latch cannot live only in one EntitySpec closure. Reconnecting
+# MQTT rebuilds the entities, and the latest wire record is usually the auto
+# re-lock (userOperation 38), which would otherwise wipe 开门方向 / 最近开门方式
+# back to unknown. The file keeps the same latch across a core restart.
+_UNLOCK_LATCH: dict[str, dict[str, Any]] = {}
+_LATCH_LOADED = False
+_LATCH_FILE = (
+    Path(__file__).resolve().parents[3]
+    / ".storage"
+    / "huawei_smarthome_unlock_latch.json"
+)
 
 # Profile characteristic names, used only to resolve enum labels.
 _USER_OPERATION_PROFILE_FIELD = "userOperation"
@@ -615,6 +629,53 @@ def _lock_event_spec() -> EntitySpec:
     )
 
 
+def _load_unlock_latch() -> None:
+    """Load the last unlock once, so a restart does not start from unknown."""
+
+    global _LATCH_LOADED
+    if _LATCH_LOADED:
+        return
+    _LATCH_LOADED = True
+    try:
+        raw = json.loads(_LATCH_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    for device_id, payload in raw.items():
+        if isinstance(device_id, str) and isinstance(payload, dict):
+            _UNLOCK_LATCH[device_id] = dict(payload)
+
+
+def _write_unlock_latch(payload: str) -> None:
+    """Persist the latch off the Home Assistant event loop."""
+
+    try:
+        _LATCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = _LATCH_FILE.with_suffix(".json.tmp")
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(_LATCH_FILE)
+    except OSError:
+        _LOGGER.debug("KW02 unlock latch could not be saved", exc_info=True)
+
+
+def _remember_unlock(device_id: str, payload: dict[str, Any]) -> None:
+    """Remember one unlock in memory and on disk."""
+
+    _UNLOCK_LATCH[device_id] = payload
+    encoded = json.dumps(_UNLOCK_LATCH, ensure_ascii=False)
+    threading.Thread(
+        target=_write_unlock_latch,
+        args=(encoded,),
+        daemon=True,
+    ).start()
+
+
+# Read before the first entity update. Import of this adapter happens while the
+# integration is being set up, outside the per-event state callback.
+_load_unlock_latch()
+
+
 def _unlock_reader() -> Callable[[DeviceContext], Mapping[str, Any]]:
     """Return a reader that keeps the latest unlock seen by one entity.
 
@@ -624,23 +685,54 @@ def _unlock_reader() -> Callable[[DeviceContext], Mapping[str, Any]]:
     instead, and later non-unlock records leave it untouched.  The triggering
     event's id and clock are cached with it, because a latched direction alone
     cannot tell two unlocks from the same side apart.
-    """
 
-    cache: dict[str, Any] = {}
+    The cache is per device, not per entity.  A reconnect builds new entity
+    objects; keeping the latch on the closure would forget the unlock and the
+    sensors would fall back to unknown as soon as the standing record is a
+    re-lock.
+    """
 
     def read(device: DeviceContext) -> Mapping[str, Any]:
         record = _event_record(device)
         operation = _number(record.get(_USER_OPERATION_FIELD))
         if _unlock_direction(operation) is not None:
-            cache.clear()
-            cache.update(
-                operation=operation,
-                eid=record.get(_EVENT_ID_FIELD),
-                time=record.get(_EVENT_TIME_FIELD),
+            _remember_unlock(
+                device.dev_id,
+                {
+                    "operation": operation,
+                    "eid": record.get(_EVENT_ID_FIELD),
+                    "time": record.get(_EVENT_TIME_FIELD),
+                },
             )
-        return cache
+        return _UNLOCK_LATCH.get(device.dev_id, {})
 
     return read
+
+
+def _unlock_attribute_state(
+    unlock: Mapping[str, Any],
+    native_value: Any,
+) -> dict[str, Any]:
+    """Publish the event id where the sensor platform can see it.
+
+    ``HuaweiAdapterSensor`` only copies ``extra_state_attributes`` onto the
+    entity.  A top-level ``last_event_id`` never becomes a state attribute, so
+    an automation triggered on that attribute never runs.
+    """
+
+    if native_value is None:
+        return {"native_value": None}
+    attributes: dict[str, Any] = {}
+    event_id = unlock.get("eid")
+    event_time = unlock.get("time")
+    if event_id is not None and str(event_id).strip():
+        attributes["last_event_id"] = str(event_id).strip()
+    if event_time is not None and str(event_time).strip():
+        attributes["last_event_time"] = str(event_time).strip()
+    state: dict[str, Any] = {"native_value": native_value}
+    if attributes:
+        state["extra_state_attributes"] = attributes
+    return state
 
 
 def _open_direction_spec(
@@ -659,14 +751,9 @@ def _open_direction_spec(
 
     def state(device: DeviceContext) -> Mapping[str, Any]:
         unlock = read_unlock(device)
-        direction = _unlock_direction(unlock.get("operation"))
-        if direction is None:
-            return {"native_value": None}
-        return {
-            "native_value": direction,
-            "last_event_id": unlock.get("eid"),
-            "last_event_time": unlock.get("time"),
-        }
+        return _unlock_attribute_state(
+            unlock, _unlock_direction(unlock.get("operation"))
+        )
 
     return EntitySpec(
         platform="sensor",
@@ -692,12 +779,10 @@ def _last_open_method_spec(
         unlock = read_unlock(device)
         value = _number(unlock.get("operation"))
         if value is None:
-            return {"native_value": None}
-        return {
-            "native_value": _operation_label(field, value) or str(value),
-            "last_event_id": unlock.get("eid"),
-            "last_event_time": unlock.get("time"),
-        }
+            return _unlock_attribute_state(unlock, None)
+        return _unlock_attribute_state(
+            unlock, _operation_label(field, value) or str(value)
+        )
 
     return EntitySpec(
         platform="sensor",
