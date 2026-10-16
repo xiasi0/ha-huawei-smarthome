@@ -40,6 +40,20 @@ snapshot of a real AGS-E211 (services the lock actually reported):
                         roster lists pushed on the wire (keyCards/faces
                         declared but empty so far)
 
+Door-leaf ordering (2026-10, real-door automation requirement): the lock
+delivers lockStatus and the event services as separate pushes, and the
+status copy can win the race, so an automation triggering on 门-已打开 used
+to read a stale 开门方向 / 最近开门方式.  The 门 entity therefore holds a
+leaf transition back until the event feed has delivered the record that
+explains the new status -- the unlock itself for an opening, any event-feed
+record (event/eventData/doorEvent/lastActionTime) for a closing -- and
+publishes it in the same update cycle in which 开门方向 / 最近开门方式 are
+written.  Home Assistant runs trigger callbacks only after that cycle, so
+they always read fresh values, in both wire orders.  A transition whose
+event push never arrives stays held until the next operation pushes new
+event data; a snapshot resync that already carries the matching event data
+publishes immediately.
+
 Unverified on this model (family-informed, kept from KW02/KW38):
 
     * unlock operation codes.  0-7 and 24 (门内开锁) come from this product's
@@ -70,7 +84,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -133,6 +147,18 @@ _EVENT_DATA_SID = "eventData"
 _EVENT_DATA_PAYLOAD_FIELD = "data"
 _USER_OPERATION_FIELD = "up"
 _DOOR_ALARM_FIELD = "das"
+_EVENT_ID_FIELD = "eid"
+_EVENT_TIME_FIELD = "et"
+
+# The event feed: every lock operation is reported on at least one of these
+# services, so the door-leaf gate below treats a push on any of them as "the
+# record explaining the new lockStatus has arrived".  doorEvent and
+# lastActionTime also feed the read-only entities further down.
+_DOOR_EVENT_SID = "doorEvent"
+_LAST_ACTION_SID = "lastActionTime"
+_EVENT_FEED_SIDS = frozenset(
+    {_EVENT_SID, _EVENT_DATA_SID, _DOOR_EVENT_SID, _LAST_ACTION_SID}
+)
 
 # Profile characteristic names, used only to resolve enum labels.
 _USER_OPERATION_PROFILE_FIELD = "userOperation"
@@ -283,9 +309,9 @@ def _refusal_action(verb: str):
     return refuse
 
 
-def _lock_spec(read_status: Callable[[DeviceContext], Any]) -> EntitySpec:
+def _lock_spec() -> EntitySpec:
     def lock_state(device: DeviceContext) -> Mapping[str, Any]:
-        status = read_status(device)
+        status = _read_status(device)
         if status in _LOCKED_STATUSES:
             return {"is_locked": True}
         if status in _UNLOCKED_STATUSES:
@@ -304,8 +330,42 @@ def _lock_spec(read_status: Callable[[DeviceContext], Any]) -> EntitySpec:
     )
 
 
-def _status_reader() -> Callable[[DeviceContext], Any]:
-    """Return a reader that keeps the last declared lockStatus value.
+# ---------------------------------------------------------------------------
+# Per-device shared state.
+#
+# ``DeviceContext.entity_specs`` rebuilds the entity specs on every read, so
+# a closure cache dies with each rebuild and two platforms (the door binary
+# sensor and the direction/method sensors) would keep private, diverging
+# copies.  All latches below therefore live in one module-level dict keyed
+# by dev_id, and every entity instance reads the same picture.
+# ---------------------------------------------------------------------------
+_DEVICE_STATE: dict[str, dict[str, Any]] = {}
+
+
+def _device_state(device: DeviceContext) -> dict[str, Any]:
+    """Return the shared latch/sequence state for one device."""
+
+    state = _DEVICE_STATE.get(device.dev_id)
+    if state is None:
+        state = {
+            "status": None,  # last declared lockStatus (live push or snapshot)
+            "live_status": None,  # last declared lockStatus seen on a live push
+            "door": None,  # last published door-leaf state
+            "unlock": None,  # latched latest unlock {operation, eid, time}
+            "seq": 0,  # monotonic count of accepted live service updates
+            "status_seq": 0,  # seq of the last live lockStatus update
+            "event_seq": 0,  # seq of the last live event-feed update
+            "unlock_seq": 0,  # seq of the update that delivered ``unlock``
+            "settled_seq": 0,  # seq when the door leaf last changed
+            "tracked": False,  # live updates are being sequenced
+            "gated": False,  # the door leaf waits for its event data
+        }
+        _DEVICE_STATE[device.dev_id] = state
+    return state
+
+
+def _read_status(device: DeviceContext) -> Any:
+    """Read lockStatus, keeping the last declared value.
 
     lockStatus/status is the service every entity of this product reads, and
     the firmware may report a value the Profile does not declare (KW02
@@ -314,25 +374,18 @@ def _status_reader() -> Callable[[DeviceContext], Any]:
     code blank all three out.
     """
 
-    cache: dict[str, Any] = {"status": None}
-
-    def read(device: DeviceContext) -> Any:
-        status = _number(device.value(_LOCK_STATUS_SID, _LOCK_STATUS_FIELD))
-        if status in _DECLARED_STATUSES:
-            cache["status"] = status
-        return cache["status"]
-
-    return read
+    state = _device_state(device)
+    status = _number(device.value(_LOCK_STATUS_SID, _LOCK_STATUS_FIELD))
+    if status in _DECLARED_STATUSES:
+        state["status"] = status
+    return state["status"]
 
 
-def _lock_status_spec(
-    profile: Mapping[str, Any],
-    read_status: Callable[[DeviceContext], Any],
-) -> EntitySpec:
+def _lock_status_spec(profile: Mapping[str, Any]) -> EntitySpec:
     field = _field(profile, _LOCK_STATUS_SID, _LOCK_STATUS_FIELD) or {}
 
     def state(device: DeviceContext) -> Mapping[str, Any]:
-        value = read_status(device)
+        value = _read_status(device)
         if value is None:
             return {"native_value": None}
         return {"native_value": _enum_label(field, value) or str(value)}
@@ -450,16 +503,61 @@ def _low_battery_spec() -> EntitySpec:
     )
 
 
-def _door_spec(read_status: Callable[[DeviceContext], Any]) -> EntitySpec:
-    """Expose the door leaf only for Profile states with an unambiguous meaning."""
+def _door_spec() -> EntitySpec:
+    """Expose the door leaf, holding a transition until its event data lands.
+
+    The lock pushes lockStatus and the event services in separate messages
+    and the status copy can win the race, so an automation triggering on
+    门-已打开 used to read a stale 开门方向 / 最近开门方式.  A leaf
+    transition is therefore held back until the event feed has delivered the
+    record that explains the new status: an opening waits for the unlock
+    itself, a closing waits for any event-feed record.  All entities of one
+    push are written in the same synchronous update cycle and Home Assistant
+    runs trigger callbacks only afterwards, so when the leaf finally flips,
+    every value read off the door trigger is already up to date.
+
+    The gate only ever *delays* a transition; it cannot block one forever in
+    the wrong direction, because the next operation pushes new event data
+    and a snapshot resync that already carries the matching event data
+    publishes immediately (``status != live_status``).
+    """
 
     def state(device: DeviceContext) -> Mapping[str, Any]:
-        status = read_status(device)
+        state_ = _device_state(device)
+        status = _read_status(device)
+        # Warm the unlock latch from the standing record: a snapshot resync
+        # can carry both the new status and its event data in one merge.
+        _read_unlock(device)
+
+        desired: bool | None = None
         if status in _DOOR_OPEN_STATUSES:
-            return {"is_on": True}
-        if status in _DOOR_CLOSED_STATUSES:
-            return {"is_on": False}
-        return {"is_on": None}
+            desired = True
+        elif status in _DOOR_CLOSED_STATUSES:
+            desired = False
+
+        held = state_["door"]
+        if desired is None or held is None or desired == held:
+            if held is None and desired is not None:
+                # First evaluation after startup: the standing snapshot is
+                # self-consistent, so publish it as-is.
+                state_["door"] = desired
+                state_["settled_seq"] = state_["seq"]
+            return {"is_on": state_["door"]}
+
+        if not state_["gated"] or status != state_["live_status"]:
+            # No live tracking, or the new status arrived through a snapshot
+            # whose event data was merged alongside it: publish now.
+            passed = True
+        elif desired:
+            # Opening: the unlock that explains it must have arrived.
+            passed = state_["unlock_seq"] > state_["settled_seq"]
+        else:
+            # Closing: any event-feed record for the close must have arrived.
+            passed = state_["event_seq"] > state_["settled_seq"]
+        if passed:
+            state_["door"] = desired
+            state_["settled_seq"] = state_["seq"]
+        return {"is_on": state_["door"]}
 
     return EntitySpec(
         platform="binary_sensor",
@@ -669,31 +767,141 @@ def _lock_event_spec() -> EntitySpec:
     )
 
 
-def _unlock_reader() -> Callable[[DeviceContext], Any]:
-    """Return a reader that keeps the latest unlock seen by one entity.
+def _read_unlock(device: DeviceContext) -> Mapping[str, Any]:
+    """Return the latched latest unlock, refreshing it from the standing record.
 
     The lock reports every operation on ``eventData``, so reading the field
     directly would let a following record such as the door-close copy (up=43)
     overwrite the unlock code.  The most recent value recognised as an unlock
-    is cached instead.
+    is latched instead -- per device, so a rebuild of the entity specs (or a
+    reconnect) cannot forget it.
+
+    A *new* unlock also advances ``unlock_seq``: live pushes do so through
+    the tracker, and this path covers a snapshot resync that already merged
+    the matching event data, letting a held-back door transition publish.
     """
 
-    cache: dict[str, Any] = {"operation": None}
+    state = _device_state(device)
+    record = _event_record(device)
+    operation = _number(record.get(_USER_OPERATION_FIELD))
+    if _unlock_direction(operation) is not None:
+        latch = {
+            "operation": operation,
+            "eid": record.get(_EVENT_ID_FIELD),
+            "time": record.get(_EVENT_TIME_FIELD),
+        }
+        if state["unlock"] != latch:
+            state["unlock"] = latch
+            state["unlock_seq"] = max(state["unlock_seq"], state["seq"])
+    # An empty mapping before the first unlock: callers read ``.get`` off the
+    # return value, and a None would raise inside the entity's state property,
+    # which Home Assistant renders as an unavailable (离线) entity.
+    return state["unlock"] or {}
 
-    def read(device: DeviceContext) -> Any:
-        operation = _number(_event_record(device).get(_USER_OPERATION_FIELD))
-        if _unlock_direction(operation) is not None:
-            cache["operation"] = operation
-        return cache["operation"]
 
-    return read
+def _unlock_attribute_state(
+    unlock: Mapping[str, Any],
+    native_value: Any,
+) -> dict[str, Any]:
+    """Publish the event id where the sensor platform can see it.
+
+    Two unlocks through the same method leave 开门方向 / 最近开门方式
+    unchanged, so a state trigger on the value alone never fires for the
+    second one.  The triggering event's id and clock ride along as
+    attributes instead: they change on every unlock, and both come from one
+    state read, so they always describe the same event.
+    """
+
+    if native_value is None:
+        return {"native_value": None}
+    attributes: dict[str, Any] = {}
+    event_id = unlock.get("eid")
+    event_time = unlock.get("time")
+    if event_id is not None and str(event_id).strip():
+        attributes["last_event_id"] = str(event_id).strip()
+    if event_time is not None and str(event_time).strip():
+        attributes["last_event_time"] = str(event_time).strip()
+    result: dict[str, Any] = {"native_value": native_value}
+    if attributes:
+        result["extra_state_attributes"] = attributes
+    return result
 
 
-def _open_direction_spec(read_unlock: Callable[[DeviceContext], Any]) -> EntitySpec:
+def _push_user_operation(sid: str, data: Mapping[str, Any]) -> Any:
+    """Return the userOperation code carried by one push itself.
+
+    The gate must not consult the merged standing record here: ``event``
+    pushes carry their own ``up`` in a different code space (200 is cat-eye
+    motion), and the merged record would still hold the previous eventData
+    unlock, so a motion push would masquerade as a fresh unlock.
+    """
+
+    if sid == _EVENT_DATA_SID:
+        raw = data.get(_EVENT_DATA_PAYLOAD_FIELD)
+        record: Any = raw
+        if isinstance(raw, str) and raw:
+            try:
+                record = json.loads(raw)
+            except ValueError:
+                return None
+    elif sid == _EVENT_SID:
+        record = data
+    else:
+        return None
+    if not isinstance(record, Mapping):
+        return None
+    return _number(record.get(_USER_OPERATION_FIELD))
+
+
+def _install_tracker(device: DeviceContext) -> None:
+    """Sequence live service updates for the door-leaf gate, once per context.
+
+    ``DeviceContext`` notifies its service-update listeners -- in push order
+    -- before any entity writes state, so the counters below are always
+    ahead of what the entities read.  Without the listener API there is no
+    sequence to gate on and the door keeps publishing immediately (the
+    pre-gate behaviour).
+    """
+
+    state = _device_state(device)
+    if getattr(device, "_kw59_tracker_installed", False):
+        return
+    device._kw59_tracker_installed = True
+    installer = getattr(device, "add_service_update_listener", None)
+    if installer is None:
+        state["tracked"] = False
+        return
+    state["tracked"] = True
+
+    def on_service_update(
+        sid: str,
+        data: Mapping[str, Any],
+        timestamp: str | None,
+    ) -> None:
+        del timestamp
+        state["seq"] += 1
+        if sid == _LOCK_STATUS_SID:
+            state["status_seq"] = state["seq"]
+            status = _number(data.get(_LOCK_STATUS_FIELD))
+            if status in _DECLARED_STATUSES:
+                state["live_status"] = status
+            return
+        if sid in _EVENT_FEED_SIDS:
+            state["event_seq"] = state["seq"]
+        if _unlock_direction(_push_user_operation(sid, data)) is not None:
+            state["unlock_seq"] = state["seq"]
+
+    installer(on_service_update)
+
+
+def _open_direction_spec() -> EntitySpec:
     """Expose whether the latest unlock came from the indoor or outdoor side."""
 
     def state(device: DeviceContext) -> Mapping[str, Any]:
-        return {"native_value": _unlock_direction(read_unlock(device))}
+        unlock = _read_unlock(device)
+        return _unlock_attribute_state(
+            unlock, _unlock_direction(unlock.get("operation"))
+        )
 
     return EntitySpec(
         platform="sensor",
@@ -703,19 +911,19 @@ def _open_direction_spec(read_unlock: Callable[[DeviceContext], Any]) -> EntityS
     )
 
 
-def _last_open_method_spec(
-    profile: Mapping[str, Any],
-    read_unlock: Callable[[DeviceContext], Any],
-) -> EntitySpec:
+def _last_open_method_spec(profile: Mapping[str, Any]) -> EntitySpec:
     """Expose the Profile label of the latest unlock operation."""
 
     field = _field(profile, _EVENT_SID, _USER_OPERATION_PROFILE_FIELD) or {}
 
     def state(device: DeviceContext) -> Mapping[str, Any]:
-        value = _number(read_unlock(device))
+        unlock = _read_unlock(device)
+        value = _number(unlock.get("operation"))
         if value is None:
-            return {"native_value": None}
-        return {"native_value": _operation_label(field, value) or str(value)}
+            return _unlock_attribute_state(unlock, None)
+        return _unlock_attribute_state(
+            unlock, _operation_label(field, value) or str(value)
+        )
 
     return EntitySpec(
         platform="sensor",
@@ -756,11 +964,18 @@ class ProductKW59Adapter:
         if profile is None or not context.has_service(_LOCK_STATUS_SID):
             return ()
 
-        read_status = _status_reader()
+        has_event_feed = context.has_service(_EVENT_SID) or context.has_service(
+            _EVENT_DATA_SID
+        )
+        _install_tracker(context)
+        # The door gate needs both the live-update sequence and the event
+        # services it waits for; without either the leaf publishes as before.
+        state = _device_state(context)
+        state["gated"] = state["tracked"] and has_event_feed
         entities: list[EntitySpec] = [
-            _lock_spec(read_status),
-            _lock_status_spec(profile, read_status),
-            _door_spec(read_status),
+            _lock_spec(),
+            _lock_status_spec(profile),
+            _door_spec(),
         ]
         if context.has_service(_DOOR_BATTERY_SID) or context.has_service(
             _BATTERY_SID
@@ -786,10 +1001,9 @@ class ProductKW59Adapter:
             entities.append(_low_battery_spec())
         if context.has_service(_NET_INFO_SID):
             entities.append(_wifi_signal_spec())
-        if context.has_service(_EVENT_SID) or context.has_service(_EVENT_DATA_SID):
-            read_unlock = _unlock_reader()
-            entities.append(_open_direction_spec(read_unlock))
-            entities.append(_last_open_method_spec(profile, read_unlock))
+        if has_event_feed:
+            entities.append(_open_direction_spec())
+            entities.append(_last_open_method_spec(profile))
             entities.append(_door_alarm_spec(profile))
             # The state entities above describe the latest operation; this
             # event entity fires on every operation, so an automation runs on
@@ -827,8 +1041,6 @@ _CIPHERS_SID = "ciphers"
 _KEY_CARDS_SID = "keyCards"
 _WATCHS_SID = "watchs"
 _WALLET_KEYS_SID = "walletKeys"
-_DOOR_EVENT_SID = "doorEvent"
-_LAST_ACTION_SID = "lastActionTime"
 
 
 def _firmware_specs(context: DeviceContext) -> list[EntitySpec]:
