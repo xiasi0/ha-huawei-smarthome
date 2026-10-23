@@ -65,14 +65,14 @@ Deliberately not exposed
 Verification status
 ===================
 
-Verified (offline, from the sanitized snapshot): the services and fields
-read below exist, their values parse with the conversions in this file, and
-the adapter produces 11 entity specs without raising.
+Verified: the services and fields read below exist in a real-device state
+snapshot, their values parse with the conversions in this file, and the
+adapter produced 11 entities in a live Home Assistant deployment without
+integration errors.
 
-Not verified: no live Home Assistant run and no real-device MQTT command
-capture.  ``update.version`` semantics (current vs available firmware),
-``weekly.deviceNum`` counting window, weekly flow/speed units, event push
-behavior, and every write payload remain unconfirmed.
+Not verified: ``update.version`` semantics (current vs available firmware),
+``weekly.deviceNum`` counting window, weekly flow/speed units, and event push
+behavior.  This adapter intentionally implements no write or control entity.
 
 """
 
@@ -461,11 +461,6 @@ def _event_specs(context: DeviceContext) -> list[EntitySpec]:
             )
         )
     return specs
-
-
-# ---------------------------------------------------------------------------
-# UNVERIFIED controls (disabled by default)
-# ---------------------------------------------------------------------------
 
 
 class ProductK10HAdapter:
