@@ -169,7 +169,11 @@ def _covers(ctx):
             await _send(c, sid, key, value)
 
         actions[name] = action
-    positions = True
+    # ``opener.current`` carries ``report: 0`` in the 140B Profile, i.e. the
+    # device never pushes its real opening percentage.  Only offer position
+    # control when the position is actually reported back, otherwise the
+    # slider and the derived open/closed state would both be fiction.
+    positions = bool((_field(ctx, "opener", "current") or {}).get("report"))
     if positions and _writable(ctx, "opener", "target"):
 
         async def position(c, data):
