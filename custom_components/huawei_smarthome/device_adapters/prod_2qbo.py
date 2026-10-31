@@ -210,7 +210,7 @@ class Product2QBOAdapter:
                     state=lambda ctx: {
                         "native_value": _number(ctx.value("temperature", "currentFloat"))
                     },
-                    metadata={"device_class": "temperature", "state_class": "measurement", "unit": "℃"},
+                    metadata={"device_class": "temperature", "state_class": "measurement", "unit": "°C"},
                 )
             )
 
